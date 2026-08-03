@@ -3,8 +3,38 @@
 
 BEGIN;
 
+CREATE TABLE IF NOT EXISTS users (
+    id VARCHAR(40) PRIMARY KEY,
+    email VARCHAR(320) NOT NULL UNIQUE,
+    display_name VARCHAR(80) NOT NULL,
+    status VARCHAR(20) NOT NULL CHECK (status IN ('active', 'disabled')),
+    created_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    id VARCHAR(40) PRIMARY KEY,
+    user_id VARCHAR(40) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    token_hash VARCHAR(64) NOT NULL UNIQUE,
+    expires_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL,
+    revoked_at TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS email_verification_codes (
+    id VARCHAR(40) PRIMARY KEY,
+    email VARCHAR(320) NOT NULL,
+    code_hash VARCHAR(64) NOT NULL,
+    attempts INTEGER NOT NULL CHECK (attempts >= 0),
+    expires_at TIMESTAMPTZ NOT NULL,
+    resend_after TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL,
+    consumed_at TIMESTAMPTZ
+);
+
 CREATE TABLE IF NOT EXISTS sources (
     id VARCHAR(40) PRIMARY KEY,
+    user_id VARCHAR(40) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     kind VARCHAR(30) NOT NULL,
     title VARCHAR(160),
     content TEXT NOT NULL,
@@ -13,6 +43,7 @@ CREATE TABLE IF NOT EXISTS sources (
 
 CREATE TABLE IF NOT EXISTS documents (
     id VARCHAR(40) PRIMARY KEY,
+    user_id VARCHAR(40) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     title VARCHAR(160) NOT NULL,
     markdown TEXT NOT NULL,
     version INTEGER NOT NULL CHECK (version >= 1),
@@ -22,6 +53,7 @@ CREATE TABLE IF NOT EXISTS documents (
 
 CREATE TABLE IF NOT EXISTS document_versions (
     id VARCHAR(40) PRIMARY KEY,
+    user_id VARCHAR(40) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     document_id VARCHAR(40) NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
     version INTEGER NOT NULL CHECK (version >= 1),
     markdown TEXT NOT NULL,
@@ -32,6 +64,7 @@ CREATE TABLE IF NOT EXISTS document_versions (
 
 CREATE TABLE IF NOT EXISTS change_sets (
     id VARCHAR(40) PRIMARY KEY,
+    user_id VARCHAR(40) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     source_id VARCHAR(40) NOT NULL REFERENCES sources(id) ON DELETE RESTRICT,
     status VARCHAR(30) NOT NULL CHECK (
         status IN ('proposed', 'applied', 'partially_applied', 'rejected')
@@ -42,6 +75,7 @@ CREATE TABLE IF NOT EXISTS change_sets (
 
 CREATE TABLE IF NOT EXISTS change_items (
     id VARCHAR(40) PRIMARY KEY,
+    user_id VARCHAR(40) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     change_set_id VARCHAR(40) NOT NULL REFERENCES change_sets(id) ON DELETE CASCADE,
     operation VARCHAR(40) NOT NULL CHECK (
         operation IN (
@@ -61,6 +95,7 @@ CREATE TABLE IF NOT EXISTS change_items (
 
 CREATE TABLE IF NOT EXISTS knowledge_events (
     id VARCHAR(40) PRIMARY KEY,
+    user_id VARCHAR(40) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     change_set_id VARCHAR(40) NOT NULL REFERENCES change_sets(id) ON DELETE RESTRICT,
     title VARCHAR(160) NOT NULL,
     summary TEXT NOT NULL,
@@ -70,8 +105,10 @@ CREATE TABLE IF NOT EXISTS knowledge_events (
     created_at TIMESTAMPTZ NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_documents_updated_at
-    ON documents (updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions (user_id, expires_at DESC);
+CREATE INDEX IF NOT EXISTS idx_email_codes_email_created ON email_verification_codes (email, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sources_user ON sources (user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_documents_user_updated ON documents (user_id, updated_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_document_versions_document
     ON document_versions (document_id, version DESC);
@@ -91,5 +128,8 @@ CREATE INDEX IF NOT EXISTS idx_change_items_target_document
 
 CREATE INDEX IF NOT EXISTS idx_knowledge_events_created_at
     ON knowledge_events (created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_knowledge_events_user_created
+    ON knowledge_events (user_id, created_at DESC);
 
 COMMIT;

@@ -1,13 +1,28 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, EmailStr, Field
 
 
 ChangeOperation = Literal[
     "CREATE_DOCUMENT", "ADD_BLOCK", "UPDATE_BLOCK", "MOVE_BLOCK",
     "ADD_RELATION", "MARK_DUPLICATE", "REPORT_CONFLICT",
 ]
+
+
+class SendVerificationCodeRequest(BaseModel):
+    email: EmailStr
+
+
+class CodeLoginRequest(BaseModel):
+    email: EmailStr
+    verification_code: str = Field(pattern=r"^\d{6}$")
+
+
+class User(BaseModel):
+    id: str
+    email: EmailStr
+    display_name: str
 
 
 class IngestionCreate(BaseModel):

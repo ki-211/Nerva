@@ -64,7 +64,7 @@ $nervaPgBin = 'C:\Program Files\PostgreSQL\17\bin'
 - 知识成长日志表 `knowledge_events`
 - 外键、检查约束和常用索引
 
-建表语句使用 `IF NOT EXISTS`，可以安全地重新执行。应用启动时 SQLAlchemy 也会补建缺失表，但数据库初始化建议明确执行该 SQL 文件。
+建表语句使用 `IF NOT EXISTS`，可以安全地重新执行。正式结构由 Alembic 管理，应用启动时不会自动修改数据库结构。
 
 ## 4. 配置本机 `.env`
 
@@ -82,6 +82,13 @@ POSTGRES_PORT=5432
 POSTGRES_DB=nerva
 POSTGRES_USER=postgres
 POSTGRES_PASSWORD=
+NERVA_CODE_SECRET=CHANGE_ME_TO_A_LONG_RANDOM_VALUE
+SMTP_HOST=smtp.qq.com
+SMTP_PORT=465
+SMTP_USERNAME=你的QQ邮箱
+SMTP_PASSWORD=<QQ邮箱SMTP授权码>
+SMTP_FROM_NAME=Nerva 团队
+SMTP_USE_SSL=true
 ```
 
 只在本机 `.env` 最后一行的等号后填写安装时设置的 `postgres` 密码。`.env` 已被 `.gitignore` 忽略，不要将密码写入 `.env.example`、README、SQL 文件或截图。
@@ -92,6 +99,7 @@ POSTGRES_PASSWORD=
 
 ```powershell
 python -m pip install -r apps/api/requirements.txt
+python -m alembic -c alembic.ini upgrade head
 python apps/api/check_db.py
 ```
 
@@ -110,12 +118,12 @@ Nerva PostgreSQL connection is ready.
 & "$nervaPgBin\psql.exe" -U postgres -h 127.0.0.1 -p 5432 -d nerva -W
 ```
 
-进入 psql 后运行 `\dt`，应该看到 6 张表；运行 `\q` 退出。
+进入 psql 后运行 `\dt`，应该看到知识表、`users`、`sessions`、`email_verification_codes` 和 `alembic_version`；运行 `\q` 退出。
 
 ## 6. 启动 Nerva
 
 ```powershell
-python -m uvicorn app.main:app --reload --app-dir apps/api --port 8000
+python -m uvicorn app.main:app --reload --app-dir apps/api --port 8001
 ```
 
 另开终端：

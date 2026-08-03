@@ -54,6 +54,7 @@ sequenceDiagram
     participant DB as PostgreSQL
 
     User->>Web: 输入标题与文字资料
+    Web->>API: HttpOnly 会话 Cookie
     Web->>API: POST /v1/ingestions
     API->>DB: 读取已有文档
     API->>AI: 生成合并建议
@@ -67,6 +68,10 @@ sequenceDiagram
 ```
 
 ## 领域边界
+
+### Identity
+
+用户通过邮箱验证码直接登录，首次验证成功时自动创建账号，不保存密码。服务端把随机会话令牌的 SHA-256 哈希存入 PostgreSQL，浏览器只持有 HttpOnly Cookie。所有知识表都有非空 `user_id`，仓储查询和审批事务始终使用认证上下文限定用户范围，前端不能指定数据所有者。
 
 ### Ingestion
 

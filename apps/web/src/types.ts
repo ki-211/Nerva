@@ -25,3 +25,4 @@ export type KnowledgeEvent = {
   affected_documents: string[]; accepted_count: number; rejected_count: number;
 };
 
+export type User = { id: string; email: string; display_name: string };
