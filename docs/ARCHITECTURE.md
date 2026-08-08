@@ -4,7 +4,7 @@
 
 Nerva 的核心不是保存笔记，而是把新输入转换为一组可审阅的知识变更。任何 AI 输出都先成为草案，只有用户接受后才会创建正式文档版本与成长日志。
 
-当前仓库实现了文字输入的最小闭环，正式运行使用 PostgreSQL，并为图片、云端模型、向量检索和跨端应用预留边界。
+当前仓库实现了文字与临时图片输入的最小闭环，正式运行使用 PostgreSQL，并为向量检索和跨端应用预留边界。
 
 ## 目录结构
 
@@ -25,6 +25,7 @@ Nerva/
 │     │  ├─ schemas.py         API 请求/响应契约
 │     │  ├─ store.py           SQLAlchemy/PostgreSQL 仓储与事务
 │     │  ├─ ai.py              AI 适配器边界与本地演示实现
+│     │  ├─ image_ingestion.py 临时图片验证、组合与安全清理
 │     │  ├─ prompts.py         可版本化 Prompt 基线
 │     │  └─ settings.py        环境变量配置
 │     ├─ tests/                知识闭环测试
@@ -53,12 +54,21 @@ sequenceDiagram
     participant AI as AI Adapter
     participant DB as PostgreSQL
 
-    User->>Web: 输入标题与文字资料
+    User->>Web: 输入文字，或选择 1～10 张图片
     Web->>API: HttpOnly 会话 Cookie
-    Web->>API: POST /v1/ingestions
-    API->>DB: 读取已有文档
-    API->>AI: 生成合并建议
-    AI-->>API: CREATE_DOCUMENT / ADD_BLOCK
+    alt 文字录入
+        Web->>API: POST /v1/ingestions
+    else 图片录入
+        Web->>API: POST /v1/image-ingestions
+        API->>AI: 最多并发 3 张调用 qwen3.5-ocr
+        API->>API: 单图请求结束立即删除临时文件
+        API->>DB: 只保存排序后的组合 OCR 文本
+    end
+    API->>DB: 保存 Source，状态改为 processing
+    API->>AI: 结构化提取 KnowledgeUnit
+    API->>DB: 仅召回当前用户相关度最高的 8 篇文档
+    API->>AI: 规划多项合并变更
+    AI-->>API: CREATE_DOCUMENT / ADD_BLOCK / MARK_DUPLICATE / REPORT_CONFLICT
     API->>DB: 保存 ChangeSet 草案
     API-->>Web: 返回逐项变更与依据
     User->>Web: 勾选并接受
@@ -75,11 +85,13 @@ sequenceDiagram
 
 ### Ingestion
 
-负责接收来源并启动处理。当前只接受 `text`；图片和 PDF 将扩展为“先上传对象存储，再创建 ingestion”，不会把大文件直接放进 JSON。
+负责接收文字或图片来源并启动处理。图片采用 `multipart/form-data`，支持 JPG、PNG、WebP，一批 1～10 张；通过文件签名、Pillow 解码、像素数和哈希校验拒绝伪造格式、损坏、动画及重复图片。图片只保存在系统随机临时目录，不进入项目、数据库或对象存储；每张 OCR 请求结束立即删除，任务结束和应用启动时再兜底清理。数据库只保存组合 OCR 文本和后续分析产物。
+
+图片阶段为 `queued → ocr → extracting → retrieving → planning → complete/failed`。OCR 失败时原图已经删除，要求用户重新上传；OCR 成功后如果知识提取或规划失败，直接使用 `sources.content` 中的 OCR 文本重试。
 
 ### AI Adapter
 
-`LocalDemoAI` 是无密钥、确定性的演示实现。正式百炼适配器应实现相同的 `propose` 契约，并拆成 OCR、知识提取、候选召回、合并规划四步。业务层不能依赖某个模型的专有响应格式。
+`LocalDemoAI` 用于无密钥开发和 Mock 测试；`BailianAI` 通过百炼 OpenAI-compatible API 依次执行知识提取和变更规划，并使用 Pydantic 严格拒绝额外字段、非法操作和越权目标文档。多输入提取要求每张图片至少有一条可在对应 OCR 中匹配的证据；遗漏时只补提一次，规划也必须覆盖全部知识单元。候选召回按输入独立评分、轮询去重，只读取当前用户的最多 8 篇相关文档。模型失败会把 Source 标记为 `failed`，不静默回退本地算法。
 
 ### ChangeSet
 
@@ -87,16 +99,26 @@ AI 永远生成变更草案而不是直接写正式文档。当前实现：
 
 - `CREATE_DOCUMENT`：创建新的正式文档和版本 1。
 - `ADD_BLOCK`：向相关文档追加内容并递增版本。
+- `MARK_DUPLICATE`：审批后只写成长日志，不修改 Markdown。
+- `REPORT_CONFLICT`：审批后只写成长日志，不修改 Markdown。
 
 后续增加 `UPDATE_BLOCK`、`ADD_RELATION`、`REPORT_CONFLICT` 等操作时，应继续通过同一个审批事务执行。
 
 ### Knowledge Store
 
-正式运行使用 PostgreSQL，当前按项目约定直接连接本地 `postgres` 管理员账号和独立 `nerva` 数据库；完整 DDL 位于 `database/schema.sql`。SQLAlchemy 隔离数据库驱动与查询实现，自动化测试使用临时 SQLite 文件，不作为应用数据源。下一步加入 pgvector 后，知识切片与向量仍保存在同一个 PostgreSQL 中；对象文件进入 OSS，任务状态与队列进入 Redis/Celery。
+正式运行使用 PostgreSQL，当前按项目约定直接连接本地 `postgres` 管理员账号和独立 `nerva` 数据库；完整 DDL 位于 `database/schema.sql`。SQLAlchemy 隔离数据库驱动与查询实现，自动化测试使用临时 SQLite 文件，不作为应用数据源。下一步加入 pgvector 后，知识切片与向量仍保存在同一个 PostgreSQL 中；当前图片不长期保存，多实例任务状态与队列未来进入 Redis/Celery。
 
 ### Knowledge Event
 
 每次审批产生不可变成长事件。事件用于回答“新增了什么、合并到哪里、影响几份文档、用户接受了哪些修改”。回滚未来也应创建反向版本和新事件，不删除旧历史。
+
+人工编辑沿用同一条审计链：保存时在一个事务内更新正式文档、创建完整版本快照、写入 `manual_edit` 变更集与成长事件。客户端必须提交 `base_version`；过期版本以 `DOCUMENT_VERSION_CONFLICT` 拒绝，避免静默覆盖。知识库阅读层渲染正式文档的 Markdown，不维护另一份“人类知识库”副本。
+
+### Export
+
+人类版导出复用正式 Markdown：单篇可按当前或指定历史版本下载，全库仅导出每篇最新版本；PDF 通过登录后的 `/export/print` A4 排版页调用浏览器打印。AI 版使用 `nerva-export-v1` ZIP，包含文档、版本、来源、知识单元、变更链和成长事件 JSONL。
+
+所有导出查询在用户级一致性只读事务中完成，并以字段白名单构建导出包。包内不包含 `user_id`、账号、验证码、会话、数据库连接、内部 `error_message` 或原始图片；图片来源只保留已入库的 OCR 文本与处理元数据。大包先写入系统临时文件，响应流结束后删除；导出本身不产生文档版本或成长事件。
 
 ## API 约定
 
@@ -104,12 +126,21 @@ AI 永远生成变更草案而不是直接写正式文档。当前实现：
 |---|---|---|
 | `GET` | `/health` | 服务状态与当前 AI Provider |
 | `POST` | `/v1/ingestions` | 创建文字输入和变更草案 |
+| `POST` | `/v1/image-ingestions` | 上传临时图片并返回异步处理状态 |
+| `GET` | `/v1/sources/{id}/processing` | 轮询 OCR 与知识整合进度 |
+| `POST` | `/v1/sources/{id}/reprocess` | 使用已保存文字和可选组织建议重新生成未审批草案 |
+| `POST` | `/v1/sources/{id}/retry` | 重试当前用户的失败来源 |
 | `GET` | `/v1/change-sets/{id}` | 获取变更草案 |
 | `POST` | `/v1/change-sets/{id}/apply` | 应用选中的变更项 |
 | `GET` | `/v1/documents` | 获取正式知识文档 |
+| `GET` | `/v1/documents/{id}` | 获取单篇正式知识文档 |
+| `GET` | `/v1/documents/{id}/versions` | 获取文档完整版本历史 |
+| `PUT` | `/v1/documents/{id}` | 以乐观并发控制保存人工编辑 |
 | `GET` | `/v1/knowledge-events` | 获取成长日志 |
+| `GET` | `/v1/exports/markdown` | 导出单篇 Markdown 或全库 Markdown ZIP |
+| `GET` | `/v1/exports/knowledge-package` | 导出单篇谱系或全库 AI 结构化 ZIP |
 
-所有公开 API 使用 `/v1` 前缀。长时间 OCR/模型调用接入后，创建接口返回 `job_id`，前端通过 SSE 接收进度。
+所有业务 API 使用 `/v1` 前缀并要求登录。图片创建接口返回 `source_id`，当前单进程 MVP 每 1.5 秒轮询处理进度；多实例部署时再迁移到持久任务队列与 SSE。
 
 ## 配置与密钥
 

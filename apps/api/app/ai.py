@@ -1,5 +1,24 @@
+import json
+import logging
 import re
-from dataclasses import dataclass
+import time
+from typing import Literal, Protocol
+
+import httpx
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+
+from .prompts import (
+    EXTRACT_KNOWLEDGE_PROMPT, EXTRACT_PROMPT_VERSION,
+    OCR_IMAGE_PROMPT, OCR_PROMPT_VERSION,
+    PLAN_MERGE_PROMPT, MERGE_PROMPT_VERSION,
+)
+from .settings import settings
+
+
+logger = logging.getLogger("nerva.ai")
+
+KnowledgeType = Literal["fact", "opinion", "claim_unverified", "definition", "procedure", "action_item"]
+AllowedOperation = Literal["CREATE_DOCUMENT", "ADD_BLOCK", "MARK_DUPLICATE", "REPORT_CONFLICT"]
 
 
 def _clean_title(value: str) -> str:
@@ -14,65 +33,544 @@ def _keywords(text: str) -> set[str]:
     return set(latin + chinese)
 
 
-@dataclass
-class MergeProposal:
-    operation: str
-    target_document_id: str | None
-    target_title: str
-    reason: str
-    before: str | None
-    after: str
-    evidence: str
-    confidence: float
+class KnowledgeUnit(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    input_index: int = Field(ge=0, le=10)
+    type: KnowledgeType
+    subject: str = Field(min_length=1, max_length=160)
+    content: str = Field(min_length=1, max_length=20_000)
+    source_span: str = Field(min_length=1, max_length=4_000)
+    confidence: float = Field(ge=0, le=1)
+
+
+class ExtractionResult(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    units: list[KnowledgeUnit] = Field(min_length=1, max_length=50)
+    uncertainties: list[str] = Field(default_factory=list, max_length=30)
+
+
+class SourceInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    input_index: int = Field(ge=0, le=10)
+    content: str = Field(min_length=1, max_length=100_000)
+
+
+class PlanningUnit(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    ref: str = Field(pattern=r"^unit_\d{3}$")
+    input_index: int = Field(ge=0, le=10)
+    type: KnowledgeType
+    subject: str
+    content: str
+    source_span: str
+    confidence: float = Field(ge=0, le=1)
+
+
+class MergeProposal(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    operation: AllowedOperation
+    unit_refs: list[str] = Field(min_length=1, max_length=50)
+    target_document_id: str | None = None
+    target_title: str = Field(min_length=1, max_length=160)
+    reason: str = Field(min_length=1, max_length=4_000)
+    before: str | None = Field(default=None, max_length=100_000)
+    after: str = Field(min_length=1, max_length=100_000)
+    evidence: str = Field(min_length=1, max_length=4_000)
+    confidence: float = Field(ge=0, le=1)
+
+    @model_validator(mode="after")
+    def validate_target(self):
+        if self.operation == "CREATE_DOCUMENT" and self.target_document_id is not None:
+            raise ValueError("CREATE_DOCUMENT cannot target an existing document")
+        if self.operation != "CREATE_DOCUMENT" and not self.target_document_id:
+            raise ValueError(f"{self.operation} requires target_document_id")
+        return self
+
+
+class MergePlan(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    items: list[MergeProposal] = Field(min_length=1, max_length=20)
+
+
+class AIProviderError(RuntimeError):
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        retryable: bool,
+        status_code: int = 502,
+        upstream_status: int | None = None,
+        upstream_code: str | None = None,
+        upstream_message: str | None = None,
+        request_id: str | None = None,
+    ):
+        super().__init__(message)
+        self.code = code
+        self.retryable = retryable
+        self.status_code = status_code
+        self.upstream_status = upstream_status
+        self.upstream_code = upstream_code
+        self.upstream_message = upstream_message
+        self.request_id = request_id
+
+
+def _safe_upstream_value(value: object, max_length: int) -> str | None:
+    if value is None:
+        return None
+    sanitized = re.sub(r"[\x00-\x1f\x7f]+", " ", str(value)).strip()
+    return sanitized[:max_length] or None
+
+
+def _upstream_error_details(response: httpx.Response) -> tuple[str | None, str | None, str | None]:
+    upstream_code = None
+    upstream_message = None
+    request_id = response.headers.get("x-request-id") or response.headers.get("request-id")
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+
+    if isinstance(payload, dict):
+        request_id = payload.get("request_id") or payload.get("requestId") or request_id
+        error = payload.get("error")
+        if isinstance(error, dict):
+            upstream_code = error.get("code") or payload.get("code")
+            upstream_message = error.get("message") or payload.get("message")
+        else:
+            upstream_code = payload.get("code")
+            upstream_message = payload.get("message") or error
+
+    return (
+        _safe_upstream_value(upstream_code, 128),
+        _safe_upstream_value(upstream_message, 500),
+        _safe_upstream_value(request_id, 128),
+    )
+
+
+class AIAdapter(Protocol):
+    provider: str
+    model: str
+
+    def extract_inputs(
+        self, inputs: list[SourceInput], source_label: str | None,
+        *, source_context: str | None = None, analysis_instruction: str | None = None,
+        repair: bool = False,
+    ) -> ExtractionResult: ...
+    def plan_units(
+        self, units: list[PlanningUnit], candidates: list[dict], source_label: str | None,
+        *, analysis_instruction: str | None = None, repair: bool = False,
+    ) -> list[MergeProposal]: ...
+
+
+class OCRResult(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    text: str = Field(min_length=1, max_length=100_000)
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    image_tokens: int | None = None
+
+
+class OCRAdapter(Protocol):
+    provider: str
+    model: str
+
+    def recognize(self, data_url: str, *, source_id: str, sequence: int) -> OCRResult: ...
+
+
+def retrieve_candidates(content: str, title: str | None, documents: list[dict], limit: int = 8) -> list[dict]:
+    incoming = _keywords((title or "") + "\n" + content)
+    ranked: list[tuple[float, dict]] = []
+    for document in documents:
+        existing = _keywords(document["title"] + "\n" + document["markdown"])
+        score = len(incoming & existing) / max(1, len(incoming | existing)) if incoming and existing else 0.0
+        if title and title.casefold() == document["title"].casefold():
+            score = max(score, 1.0)
+        if score > 0:
+            ranked.append((score, document))
+    ranked.sort(key=lambda pair: pair[0], reverse=True)
+    return [document for _, document in ranked[:limit]]
+
+
+def retrieve_candidates_balanced(
+    inputs: list[SourceInput], title: str | None, documents: list[dict], limit: int = 8,
+) -> list[dict]:
+    """Round-robin independently ranked inputs so one topic cannot fill every slot."""
+    rankings = [retrieve_candidates(item.content, None, documents, limit=limit) for item in inputs]
+    selected: list[dict] = []
+    seen: set[str] = set()
+    for position in range(limit):
+        added = False
+        for ranking in rankings:
+            if position >= len(ranking):
+                continue
+            candidate = ranking[position]
+            if candidate["id"] in seen:
+                continue
+            seen.add(candidate["id"])
+            selected.append(candidate)
+            added = True
+            if len(selected) >= limit:
+                return selected
+        if not added and all(position >= len(ranking) - 1 for ranking in rankings):
+            break
+    return selected
+
+
+def _normalized_evidence(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip().casefold()
+
+
+def validate_extraction(
+    extraction: ExtractionResult, inputs: list[SourceInput],
+) -> tuple[ExtractionResult, list[int]]:
+    by_index = {item.input_index: item for item in inputs}
+    valid: list[KnowledgeUnit] = []
+    seen: set[tuple[int, str, str, str]] = set()
+    for unit in extraction.units:
+        source = by_index.get(unit.input_index)
+        if not source:
+            continue
+        evidence = _normalized_evidence(unit.source_span)
+        if not evidence or evidence not in _normalized_evidence(source.content):
+            continue
+        key = (
+            unit.input_index, unit.type, unit.subject.strip().casefold(),
+            _normalized_evidence(unit.content),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        valid.append(unit)
+    covered = {unit.input_index for unit in valid}
+    missing = sorted(set(by_index) - covered)
+    return extraction.model_copy(update={"units": valid}), missing
+
+
+def combine_extractions(first: ExtractionResult, second: ExtractionResult) -> ExtractionResult:
+    combined = list(first.units)
+    seen = {
+        (unit.input_index, unit.type, unit.subject.strip().casefold(), _normalized_evidence(unit.content))
+        for unit in combined
+    }
+    for unit in second.units:
+        key = (unit.input_index, unit.type, unit.subject.strip().casefold(), _normalized_evidence(unit.content))
+        if key not in seen:
+            combined.append(unit)
+            seen.add(key)
+    if len(combined) > 50:
+        raise AIProviderError("AI_SCHEMA_ERROR", "知识单元数量超过限制", retryable=True)
+    if not combined:
+        return first.model_copy(update={"units": []})
+    return ExtractionResult(
+        units=combined,
+        uncertainties=list(dict.fromkeys(first.uncertainties + second.uncertainties))[:30],
+    )
+
+
+def build_planning_units(extraction: ExtractionResult) -> list[PlanningUnit]:
+    return [PlanningUnit(ref=f"unit_{index:03d}", **unit.model_dump()) for index, unit in enumerate(extraction.units, 1)]
+
+
+def missing_proposal_refs(proposals: list[MergeProposal], units: list[PlanningUnit]) -> list[str]:
+    expected = {unit.ref for unit in units}
+    claimed = {ref for proposal in proposals for ref in proposal.unit_refs}
+    unknown = claimed - expected
+    if unknown:
+        raise AIProviderError("AI_INVALID_UNIT_REF", "模型引用了不存在的知识单元", retryable=True)
+    covered = claimed
+    return sorted(expected - covered)
 
 
 class LocalDemoAI:
-    """Deterministic adapter used until a cloud model is configured."""
+    """Deterministic two-stage adapter for local development and tests."""
+
+    provider = "local"
+    model = "local-demo-v2"
+
+    def extract_inputs(
+        self, inputs: list[SourceInput], source_label: str | None,
+        *, source_context: str | None = None, analysis_instruction: str | None = None,
+        repair: bool = False,
+    ) -> ExtractionResult:
+        units = []
+        for item in inputs:
+            subject = _clean_title(
+                source_label if len(inputs) == 1 and source_label else next(
+                    (line for line in item.content.splitlines() if line.strip()),
+                    "未命名知识",
+                )
+            )
+            units.append(KnowledgeUnit(
+                input_index=item.input_index, type="fact", subject=subject,
+                content=item.content.strip(), source_span=item.content.strip()[:4000],
+                confidence=0.86,
+            ))
+        return ExtractionResult(units=units)
+
+    def extract(self, content: str, title: str | None) -> ExtractionResult:
+        return self.extract_inputs([SourceInput(input_index=0, content=content.strip())], title)
+
+    def plan_units(
+        self, units: list[PlanningUnit], candidates: list[dict], source_label: str | None,
+        *, analysis_instruction: str | None = None, repair: bool = False,
+    ) -> list[MergeProposal]:
+        groups: dict[int, list[PlanningUnit]] = {}
+        for unit in units:
+            groups.setdefault(unit.input_index, []).append(unit)
+        proposals: list[MergeProposal] = []
+        for input_index, grouped in groups.items():
+            content = "\n\n".join(unit.content for unit in grouped)
+            evidence = grouped[0].source_span
+            if candidates:
+                best = candidates[min(len(proposals), len(candidates) - 1)]
+                proposals.append(MergeProposal(
+                    operation="ADD_BLOCK", unit_refs=[unit.ref for unit in grouped],
+                    target_document_id=best["id"], target_title=best["title"],
+                    reason=f"图片 {input_index} 的资料与《{best['title']}》相关，建议补充。",
+                    before=best["markdown"], after=f"## 新增资料\n\n{content}",
+                    evidence=evidence, confidence=0.82,
+                ))
+                continue
+            title = _clean_title(grouped[0].subject or source_label or "未命名知识")
+            markdown = content if content.startswith("#") else f"# {title}\n\n{content}"
+            proposals.append(MergeProposal(
+                operation="CREATE_DOCUMENT", unit_refs=[unit.ref for unit in grouped],
+                target_document_id=None, target_title=title,
+                reason="现有知识库中没有足够相关的文档，建议创建新文档。",
+                before=None, after=markdown, evidence=evidence, confidence=0.86,
+            ))
+        return proposals
+
+    def plan(
+        self, extraction: ExtractionResult, candidates: list[dict], requested_title: str | None,
+    ) -> list[MergeProposal]:
+        return self.plan_units(build_planning_units(extraction), candidates, requested_title)
 
     def propose(self, content: str, requested_title: str | None, documents: list[dict]) -> MergeProposal:
-        first_line = next((line for line in content.splitlines() if line.strip()), "未命名知识")
-        title = _clean_title(requested_title or first_line)
-        incoming = _keywords(title + "\n" + content)
+        extraction = self.extract(content, requested_title)
+        candidates = retrieve_candidates(content, requested_title, documents)
+        return self.plan(extraction, candidates, requested_title)[0]
 
-        best = None
-        best_score = 0.0
-        for document in documents:
-            existing = _keywords(document["title"] + "\n" + document["markdown"])
-            if not incoming or not existing:
+
+class BailianAI:
+    provider = "bailian"
+
+    def __init__(self, client: httpx.Client | None = None):
+        settings.validate()
+        if "YOUR_" in settings.dashscope_base_url or "WORKSPACE_ID" in settings.dashscope_base_url:
+            raise RuntimeError("DASHSCOPE_BASE_URL still contains a placeholder")
+        self.model = settings.text_model
+        self.base_url = settings.dashscope_base_url.rstrip("/")
+        self.client = client or httpx.Client(
+            timeout=httpx.Timeout(60.0, connect=10.0),
+            headers={"Authorization": f"Bearer {settings.dashscope_api_key}", "Content-Type": "application/json"},
+        )
+
+    def _chat(self, system_prompt: str, user_payload: dict, prompt_version: str) -> dict:
+        started = time.perf_counter()
+        try:
+            response = self.client.post(f"{self.base_url}/chat/completions", json={
+                "model": self.model,
+                "messages": [
+                    {"role": "system", "content": f"{system_prompt}\nReturn valid json only."},
+                    {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+                ],
+                "temperature": 0.1,
+                "enable_thinking": False,
+                "response_format": {"type": "json_object"},
+            })
+            response.raise_for_status()
+        except httpx.TimeoutException as exc:
+            raise AIProviderError("AI_TIMEOUT", "模型响应超时", retryable=True, status_code=503) from exc
+        except httpx.HTTPStatusError as exc:
+            retryable = exc.response.status_code == 429 or exc.response.status_code >= 500
+            code = "AI_RATE_LIMITED" if exc.response.status_code == 429 else "AI_UPSTREAM_ERROR"
+            upstream_code, upstream_message, request_id = _upstream_error_details(exc.response)
+            raise AIProviderError(
+                code,
+                "模型服务暂时不可用",
+                retryable=retryable,
+                status_code=503 if retryable else 502,
+                upstream_status=exc.response.status_code,
+                upstream_code=upstream_code,
+                upstream_message=upstream_message,
+                request_id=request_id,
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise AIProviderError("AI_NETWORK_ERROR", "无法连接模型服务", retryable=True, status_code=503) from exc
+
+        elapsed_ms = round((time.perf_counter() - started) * 1000)
+        try:
+            payload = response.json()
+            content = payload["choices"][0]["message"]["content"]
+            parsed = json.loads(content)
+        except (ValueError, KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
+            raise AIProviderError("AI_INVALID_RESPONSE", "模型返回格式无效", retryable=True) from exc
+        usage = payload.get("usage", {})
+        logger.info(
+            "ai_call provider=bailian model=%s prompt=%s elapsed_ms=%s prompt_tokens=%s completion_tokens=%s",
+            self.model, prompt_version, elapsed_ms, usage.get("prompt_tokens"), usage.get("completion_tokens"),
+        )
+        return parsed
+
+    def extract_inputs(
+        self, inputs: list[SourceInput], source_label: str | None,
+        *, source_context: str | None = None, analysis_instruction: str | None = None,
+        repair: bool = False,
+    ) -> ExtractionResult:
+        raw = self._chat(EXTRACT_KNOWLEDGE_PROMPT, {
+            "task": "repair_missing_inputs" if repair else "extract_knowledge",
+            "source_label": source_label,
+            "source_context": source_context,
+            "analysis_instruction": analysis_instruction,
+            "source_inputs": [item.model_dump() for item in inputs],
+            "output_schema": ExtractionResult.model_json_schema(),
+        }, EXTRACT_PROMPT_VERSION)
+        try:
+            return ExtractionResult.model_validate(raw)
+        except ValidationError as exc:
+            raise AIProviderError("AI_SCHEMA_ERROR", "知识提取结果未通过结构校验", retryable=True) from exc
+
+    def extract(self, content: str, title: str | None) -> ExtractionResult:
+        return self.extract_inputs([SourceInput(input_index=0, content=content.strip())], title)
+
+    def plan_units(
+        self, units: list[PlanningUnit], candidates: list[dict], source_label: str | None,
+        *, analysis_instruction: str | None = None, repair: bool = False,
+    ) -> list[MergeProposal]:
+        trimmed_candidates = [{
+            "id": item["id"], "title": item["title"], "version": item["version"],
+            "markdown": item["markdown"][:6000],
+        } for item in candidates]
+        raw = self._chat(PLAN_MERGE_PROMPT, {
+            "task": "repair_incomplete_plan" if repair else "plan_merge",
+            "source_label": source_label,
+            "analysis_instruction": analysis_instruction,
+            "new_units": [unit.model_dump() for unit in units],
+            "candidate_documents": trimmed_candidates,
+            "output_schema": MergePlan.model_json_schema(),
+        }, MERGE_PROMPT_VERSION)
+        try:
+            plan = MergePlan.model_validate(raw)
+        except ValidationError as exc:
+            raise AIProviderError("AI_SCHEMA_ERROR", "变更规划结果未通过结构校验", retryable=True) from exc
+
+        candidates_by_id = {item["id"]: item for item in candidates}
+        canonical: list[MergeProposal] = []
+        for proposal in plan.items:
+            if proposal.operation == "CREATE_DOCUMENT":
+                canonical.append(proposal)
                 continue
-            score = len(incoming & existing) / max(1, len(incoming | existing))
-            if title.lower() == document["title"].lower():
-                score = max(score, 0.95)
-            if score > best_score:
-                best, best_score = document, score
+            target = candidates_by_id.get(proposal.target_document_id or "")
+            if not target:
+                raise AIProviderError("AI_INVALID_TARGET", "模型选择了无效目标文档", retryable=True)
+            canonical.append(proposal.model_copy(update={
+                "target_title": target["title"], "before": target["markdown"],
+            }))
+        return canonical
 
-        normalized = content.strip()
-        if best and best_score >= 0.18:
-            return MergeProposal(
-                operation="ADD_BLOCK",
-                target_document_id=best["id"],
-                target_title=best["title"],
-                reason=f"新资料与《{best['title']}》主题相关，建议作为新章节补充。",
-                before=best["markdown"],
-                after=f"## 新增资料\n\n{normalized}",
-                evidence=normalized[:280],
-                confidence=min(0.96, 0.72 + best_score / 4),
-            )
+    def plan(
+        self, extraction: ExtractionResult, candidates: list[dict], requested_title: str | None,
+    ) -> list[MergeProposal]:
+        return self.plan_units(build_planning_units(extraction), candidates, requested_title)
 
-        markdown = normalized if normalized.startswith("#") else f"# {title}\n\n{normalized}"
-        return MergeProposal(
-            operation="CREATE_DOCUMENT",
-            target_document_id=None,
-            target_title=title,
-            reason="现有知识库中没有足够相关的文档，建议创建新文档。",
-            before=None,
-            after=markdown,
-            evidence=normalized[:280],
-            confidence=0.86,
+
+class LocalDemoOCR:
+    """Deterministic OCR adapter for local UI development and tests."""
+
+    provider = "local"
+    model = "local-demo-ocr-v1"
+
+    def recognize(self, data_url: str, *, source_id: str, sequence: int) -> OCRResult:
+        if not data_url.startswith("data:image/"):
+            raise AIProviderError("OCR_INVALID_IMAGE", "图片数据格式无效", retryable=False, status_code=400)
+        return OCRResult(text=f"# 图片 {sequence}\n\n本地 OCR 演示识别结果。")
+
+
+class BailianOCR:
+    provider = "bailian"
+
+    def __init__(self, client: httpx.Client | None = None):
+        settings.validate()
+        if "YOUR_" in settings.dashscope_base_url or "WORKSPACE_ID" in settings.dashscope_base_url:
+            raise RuntimeError("DASHSCOPE_BASE_URL still contains a placeholder")
+        self.model = settings.ocr_model
+        self.base_url = settings.dashscope_base_url.rstrip("/")
+        self.client = client or httpx.Client(
+            timeout=httpx.Timeout(120.0, connect=10.0),
+            headers={"Authorization": f"Bearer {settings.dashscope_api_key}", "Content-Type": "application/json"},
+        )
+
+    def recognize(self, data_url: str, *, source_id: str, sequence: int) -> OCRResult:
+        started = time.perf_counter()
+        try:
+            response = self.client.post(f"{self.base_url}/chat/completions", json={
+                "model": self.model,
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": data_url},
+                            "min_pixels": 3072,
+                            "max_pixels": 8_388_608,
+                        },
+                        {"type": "text", "text": OCR_IMAGE_PROMPT},
+                    ],
+                }],
+                "temperature": 0.01,
+            })
+            response.raise_for_status()
+        except httpx.TimeoutException as exc:
+            raise AIProviderError("OCR_TIMEOUT", "图片识别超时，请重新上传", retryable=False, status_code=503) from exc
+        except httpx.HTTPStatusError as exc:
+            upstream_code, upstream_message, request_id = _upstream_error_details(exc.response)
+            code = "OCR_RATE_LIMITED" if exc.response.status_code == 429 else "OCR_UPSTREAM_ERROR"
+            raise AIProviderError(
+                code, "图片识别失败，请重新上传", retryable=False,
+                status_code=503 if exc.response.status_code == 429 or exc.response.status_code >= 500 else 502,
+                upstream_status=exc.response.status_code, upstream_code=upstream_code,
+                upstream_message=upstream_message, request_id=request_id,
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise AIProviderError("OCR_NETWORK_ERROR", "无法连接图片识别服务，请重新上传", retryable=False, status_code=503) from exc
+
+        elapsed_ms = round((time.perf_counter() - started) * 1000)
+        try:
+            payload = response.json()
+            content = payload["choices"][0]["message"]["content"].strip()
+            if not content:
+                raise ValueError("empty OCR content")
+        except (ValueError, KeyError, IndexError, TypeError) as exc:
+            raise AIProviderError("OCR_INVALID_RESPONSE", "图片识别结果为空或格式无效，请重新上传", retryable=False) from exc
+        usage = payload.get("usage", {})
+        prompt_details = usage.get("prompt_tokens_details") or {}
+        logger.info(
+            "ocr_call provider=bailian model=%s prompt=%s source_id=%s sequence=%s elapsed_ms=%s "
+            "prompt_tokens=%s completion_tokens=%s image_tokens=%s",
+            self.model, OCR_PROMPT_VERSION, source_id, sequence, elapsed_ms,
+            usage.get("prompt_tokens"), usage.get("completion_tokens"), prompt_details.get("image_tokens"),
+        )
+        return OCRResult(
+            text=content,
+            prompt_tokens=usage.get("prompt_tokens"),
+            completion_tokens=usage.get("completion_tokens"),
+            image_tokens=prompt_details.get("image_tokens"),
         )
 
 
-def get_ai_adapter() -> LocalDemoAI:
-    # The provider seam is intentional: Bailian will implement the same contract.
-    return LocalDemoAI()
+def get_ai_adapter() -> AIAdapter:
+    if settings.ai_provider == "local":
+        return LocalDemoAI()
+    if settings.ai_provider == "bailian":
+        return BailianAI()
+    raise RuntimeError(f"Unsupported NERVA_AI_PROVIDER: {settings.ai_provider}")
 
+
+def get_ocr_adapter() -> OCRAdapter:
+    if settings.ai_provider == "local":
+        return LocalDemoOCR()
+    if settings.ai_provider == "bailian":
+        return BailianOCR()
+    raise RuntimeError(f"Unsupported NERVA_AI_PROVIDER: {settings.ai_provider}")

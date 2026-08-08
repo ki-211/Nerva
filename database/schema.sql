@@ -38,6 +38,46 @@ CREATE TABLE IF NOT EXISTS sources (
     kind VARCHAR(30) NOT NULL,
     title VARCHAR(160),
     content TEXT NOT NULL,
+    processing_status VARCHAR(30) NOT NULL CHECK (
+        processing_status IN ('received', 'processing', 'proposed', 'failed')
+    ),
+    ai_provider VARCHAR(40),
+    ai_model VARCHAR(160),
+    prompt_version VARCHAR(80),
+    error_code VARCHAR(80),
+    error_message TEXT,
+    processing_stage VARCHAR(30) NOT NULL CHECK (
+        processing_stage IN ('queued', 'ocr', 'extracting', 'coverage_repair', 'retrieving', 'planning', 'complete', 'failed')
+    ),
+    processing_started_at TIMESTAMPTZ,
+    total_inputs INTEGER NOT NULL CHECK (total_inputs >= 0),
+    processed_inputs INTEGER NOT NULL CHECK (
+        processed_inputs >= 0 AND processed_inputs <= total_inputs
+    ),
+    covered_inputs INTEGER NOT NULL CHECK (
+        covered_inputs >= 0 AND covered_inputs <= total_inputs
+    ),
+    extraction_attempts INTEGER NOT NULL CHECK (
+        extraction_attempts >= 0 AND extraction_attempts <= 2
+    ),
+    pending_supersedes_change_set_id VARCHAR(40),
+    pending_analysis_instruction TEXT,
+    ocr_model VARCHAR(160),
+    ocr_prompt_version VARCHAR(80),
+    processed_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS knowledge_units (
+    id VARCHAR(40) PRIMARY KEY,
+    user_id VARCHAR(40) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    source_id VARCHAR(40) NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+    input_index INTEGER NOT NULL CHECK (input_index >= 0),
+    type VARCHAR(40) NOT NULL,
+    subject VARCHAR(160) NOT NULL,
+    content TEXT NOT NULL,
+    source_span TEXT NOT NULL,
+    confidence DOUBLE PRECISION NOT NULL CHECK (confidence BETWEEN 0 AND 1),
     created_at TIMESTAMPTZ NOT NULL
 );
 
@@ -56,6 +96,7 @@ CREATE TABLE IF NOT EXISTS document_versions (
     user_id VARCHAR(40) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     document_id VARCHAR(40) NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
     version INTEGER NOT NULL CHECK (version >= 1),
+    title VARCHAR(160) NOT NULL,
     markdown TEXT NOT NULL,
     reason TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL,
@@ -65,13 +106,23 @@ CREATE TABLE IF NOT EXISTS document_versions (
 CREATE TABLE IF NOT EXISTS change_sets (
     id VARCHAR(40) PRIMARY KEY,
     user_id VARCHAR(40) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    source_id VARCHAR(40) NOT NULL REFERENCES sources(id) ON DELETE RESTRICT,
+    source_id VARCHAR(40) REFERENCES sources(id) ON DELETE RESTRICT,
+    origin VARCHAR(30) NOT NULL CHECK (origin IN ('ai_ingestion', 'manual_edit')),
     status VARCHAR(30) NOT NULL CHECK (
-        status IN ('proposed', 'applied', 'partially_applied', 'rejected')
+        status IN ('proposed', 'applied', 'partially_applied', 'rejected', 'superseded')
     ),
     summary TEXT NOT NULL,
+    supersedes_change_set_id VARCHAR(40) REFERENCES change_sets(id) ON DELETE SET NULL,
+    analysis_instruction TEXT,
     created_at TIMESTAMPTZ NOT NULL
 );
+
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_sources_pending_supersedes') THEN
+        ALTER TABLE sources ADD CONSTRAINT fk_sources_pending_supersedes
+            FOREIGN KEY (pending_supersedes_change_set_id) REFERENCES change_sets(id) ON DELETE SET NULL;
+    END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS change_items (
     id VARCHAR(40) PRIMARY KEY,
@@ -80,11 +131,12 @@ CREATE TABLE IF NOT EXISTS change_items (
     operation VARCHAR(40) NOT NULL CHECK (
         operation IN (
             'CREATE_DOCUMENT', 'ADD_BLOCK', 'UPDATE_BLOCK', 'MOVE_BLOCK',
-            'ADD_RELATION', 'MARK_DUPLICATE', 'REPORT_CONFLICT'
+            'ADD_RELATION', 'MARK_DUPLICATE', 'REPORT_CONFLICT', 'UPDATE_DOCUMENT'
         )
     ),
     target_document_id VARCHAR(40) REFERENCES documents(id) ON DELETE SET NULL,
     target_title VARCHAR(160) NOT NULL,
+    before_title VARCHAR(160),
     reason TEXT NOT NULL,
     before_text TEXT,
     after_text TEXT NOT NULL,
@@ -108,7 +160,17 @@ CREATE TABLE IF NOT EXISTS knowledge_events (
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions (user_id, expires_at DESC);
 CREATE INDEX IF NOT EXISTS idx_email_codes_email_created ON email_verification_codes (email, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sources_user ON sources (user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sources_user_status
+    ON sources (user_id, processing_status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sources_user_stage
+    ON sources (user_id, processing_stage, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_knowledge_units_source ON knowledge_units (source_id);
+CREATE INDEX IF NOT EXISTS idx_knowledge_units_source_input
+    ON knowledge_units (source_id, input_index);
+CREATE INDEX IF NOT EXISTS idx_knowledge_units_user
+    ON knowledge_units (user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_documents_user_updated ON documents (user_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_documents_updated_at ON documents (updated_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_document_versions_document
     ON document_versions (document_id, version DESC);

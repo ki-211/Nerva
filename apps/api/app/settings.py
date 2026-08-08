@@ -34,7 +34,7 @@ class Settings:
         "DASHSCOPE_BASE_URL",
         "https://dashscope.aliyuncs.com/compatible-mode/v1",
     )
-    text_model: str = os.getenv("NERVA_TEXT_MODEL", "qwen3.6-flash")
+    text_model: str = os.getenv("NERVA_TEXT_MODEL", "qwen3.7-plus")
     ocr_model: str = os.getenv("NERVA_OCR_MODEL", "qwen3.5-ocr")
     embedding_model: str = os.getenv("NERVA_EMBEDDING_MODEL", "text-embedding-v4")
     rerank_model: str = os.getenv("NERVA_RERANK_MODEL", "qwen3-rerank")
@@ -64,8 +64,17 @@ class Settings:
     smtp_use_ssl: bool = os.getenv("SMTP_USE_SSL", "true").lower() == "true"
 
     def validate(self) -> None:
-        if self.ai_provider != "local" and not self.dashscope_api_key:
-            raise RuntimeError("DASHSCOPE_API_KEY is required when cloud AI is enabled")
+        if self.ai_provider not in {"local", "bailian"}:
+            raise RuntimeError(f"Unsupported NERVA_AI_PROVIDER: {self.ai_provider}")
+        if self.ai_provider == "bailian":
+            if not self.dashscope_api_key:
+                raise RuntimeError("DASHSCOPE_API_KEY is required when Bailian AI is enabled")
+            if not self.dashscope_base_url.startswith("https://"):
+                raise RuntimeError("DASHSCOPE_BASE_URL must use HTTPS")
+            if not self.text_model.strip():
+                raise RuntimeError("NERVA_TEXT_MODEL is required when Bailian AI is enabled")
+            if not self.ocr_model.strip():
+                raise RuntimeError("NERVA_OCR_MODEL is required when Bailian AI is enabled")
 
     def sqlalchemy_url(self) -> str | URL:
         if self.database_url:

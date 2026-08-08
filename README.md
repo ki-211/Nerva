@@ -9,12 +9,16 @@ Nerva 是一个开源的 AI 个人知识系统。它不会只把图片或文字�
 当前版本实现第一条可运行闭环：
 
 1. 使用邮箱验证码直接登录，首次登录自动创建独立账号；
-2. 输入文字资料；
+2. 输入文字资料，或一次上传 1～10 张 JPG、PNG、WebP 文字图片；图片只在系统临时目录存在到 OCR 完成；
 3. 生成知识变更草案；
 4. 审阅并接受变更；
-5. 生成用户独立的文档版本和知识成长日志。
+5. 在面向人的知识库中搜索、阅读和手工编辑 Markdown 文档；
+6. 导出当前文档或全部知识：人类阅读版支持 Markdown 和浏览器打印 PDF，AI 版为带完整谱系的结构化 ZIP 知识包；
+7. 查看版本历史，以及可展开到变更前后、依据和原始输入的知识成长日志。
 
-默认使用本地演示 AI，无需注册云服务或配置 Key。现有静态视觉稿保留在 `UI/`，产品代码位于 `apps/`。完整代码说明见 [架构文档](docs/ARCHITECTURE.md)。
+当前支持本地 Mock 和真实阿里云百炼两种 Provider；百炼模式采用“知识提取 → 候选召回 → 多项变更规划 → 用户审批”两阶段结构化调用。现有静态视觉稿保留在 `UI/`，产品代码位于 `apps/`。完整代码说明见 [架构文档](docs/ARCHITECTURE.md)。
+
+多图片录入会按图片校验知识覆盖。首次整体提取遗漏某张图时，只对遗漏 OCR 文本补提一次；仍不完整则明确失败，不生成残缺草案。不同主题会拆成不同文档。未审批草案支持填写组织建议并使用已保存文字重新分析，旧草案只在新草案成功后标记为已取代。
 
 ## 代码结构
 
@@ -39,7 +43,7 @@ python -m alembic -c alembic.ini upgrade head
 python apps/api/check_db.py
 
 # API（终端 1）
-python -m uvicorn app.main:app --reload --app-dir apps/api --port 8001
+python -m uvicorn app.main:app --reload --app-dir apps/api --port 8000
 
 # Web（终端 2）
 pnpm --dir apps/web dev
@@ -53,7 +57,9 @@ API 日志同时输出到控制台和 `logs/nerva-api.log`，达到 5 MB 后自�
 
 ## AI 配置
 
-默认使用确定性的本地演示适配器，无需 API Key。云端百炼适配器会通过相同接口接入。
+默认使用确定性的本地演示适配器，无需 API Key。设置 `NERVA_AI_PROVIDER=bailian` 后会调用百炼 OpenAI-compatible API；失败来源会保留稳定错误码和 `source_id`，不会回退为关键词结果，可在页面直接重试。
+
+图片录入使用 `qwen3.5-ocr`。后端只把图片写入随机系统临时目录，单图 OCR 请求完成后立即删除，任务结束再兜底清理；数据库只保存组合后的 OCR 文本、知识单元、变更草案和成长日志。OCR 失败必须重新上传，OCR 成功后的知识整合失败可以直接用已保存文本重试。
 
 复制 `.env.example` 为本机 `.env`，将 Provider 切换为 `bailian` 并在本地填写真实值。不要直接修改示例文件存放真实值。`.gitignore` 会忽略 `.env`、私钥、签名密钥和本地数据库。提交前可运行：
 
@@ -74,6 +80,7 @@ powershell -ExecutionPolicy Bypass -File scripts/check-secrets.ps1
 Push-Location apps/api
 python -m unittest discover -s tests -v
 Pop-Location
+python -m alembic -c alembic.ini check
 pnpm --dir apps/web run build
 powershell -ExecutionPolicy Bypass -File scripts/check-secrets.ps1
 ```
