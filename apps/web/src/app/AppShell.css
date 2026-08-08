@@ -1,0 +1,191 @@
+.app-shell {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 250px 1fr;
+}
+
+aside {
+  position: fixed;
+  inset: 0 auto 0 0;
+  width: 250px;
+  padding: 28px 18px;
+  background: #172d25;
+  color: #edf5f0;
+  display: flex;
+  flex-direction: column;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 8px 28px;
+}
+
+.brand-mark {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 12px;
+  background: #d4efdf;
+  color: #173c2e;
+  font-weight: 800;
+}
+
+.brand div {
+  display: grid;
+}
+
+.brand small {
+  color: #91a89e;
+  margin-top: 2px;
+}
+
+.new,
+main button {
+  border: 0;
+  border-radius: 10px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.new {
+  height: 46px;
+  background: #d6f1e1;
+  color: #163d2e;
+  font-weight: 700;
+}
+
+nav {
+  display: grid;
+  gap: 6px;
+  margin-top: 26px;
+}
+
+nav button {
+  border: 0;
+  background: transparent;
+  color: #b7c8c0;
+  padding: 13px 14px;
+  text-align: left;
+  border-radius: 9px;
+  font: inherit;
+  cursor: pointer;
+}
+
+nav button.active {
+  background: #29483b;
+  color: white;
+}
+
+nav em {
+  float: right;
+  font-style: normal;
+  color: #80998d;
+}
+
+.account {
+  margin-top: auto;
+  display: grid;
+  grid-template-columns: 36px 1fr auto;
+  gap: 10px;
+  align-items: center;
+  padding: 18px 8px 8px;
+  border-top: 1px solid #29483b;
+}
+
+.account > span {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: #d6f1e1;
+  color: #173c2e;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.account div {
+  display: grid;
+  min-width: 0;
+}
+
+.account small {
+  color: #91a89e;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.account button {
+  border: 0;
+  background: transparent;
+  color: #aac0b6;
+  cursor: pointer;
+}
+
+.side-note {
+  margin-top: 0 !important;
+  padding: 16px 8px;
+  color: #aac0b6;
+  font-size: 13px;
+  line-height: 1.8;
+}
+
+.side-note i {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  background: #5fd296;
+  border-radius: 50%;
+  margin-right: 8px;
+}
+
+.side-note span {
+  color: #718b80;
+  margin-left: 17px;
+}
+
+main {
+  grid-column: 2;
+  padding: 52px clamp(32px, 6vw, 86px);
+  max-width: 1500px;
+  width: 100%;
+}
+
+@media (max-width: 900px) {
+  .app-shell {
+    display: block;
+  }
+
+  aside {
+    position: static;
+    width: auto;
+    height: auto;
+    padding: 16px;
+  }
+
+  .brand {
+    padding-bottom: 14px;
+  }
+
+  .new,
+  .side-note {
+    display: none;
+  }
+
+  nav {
+    display: flex;
+    margin-top: 0;
+    overflow: auto;
+  }
+
+  nav button {
+    white-space: nowrap;
+  }
+
+  main {
+    padding: 28px 18px;
+  }
+}

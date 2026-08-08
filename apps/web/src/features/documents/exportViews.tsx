@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { api } from './api';
+import { api } from '../../lib/api';
 import { MarkdownView } from './knowledgeViews';
-import type { Document } from './types';
+import type { Document } from '../../lib/types';
 import './exportViews.css';
 
 

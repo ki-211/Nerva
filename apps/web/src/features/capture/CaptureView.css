@@ -1,0 +1,391 @@
+.capture-view {
+  width: 100%;
+}
+
+.capture-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 38px;
+}
+
+.eyebrow {
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  color: #738079;
+  font-weight: 700;
+}
+
+h1 {
+  font-size: 32px;
+  margin: 8px 0 0;
+  letter-spacing: -0.04em;
+}
+
+.status {
+  font-size: 13px;
+  color: #2c6d53;
+  background: #e4eee8;
+  padding: 9px 13px;
+  border-radius: 30px;
+}
+
+.capture-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(310px, 0.8fr);
+  gap: 20px;
+}
+
+.capture-mode-tabs {
+  grid-column: 1 / -1;
+  display: flex;
+  gap: 10px;
+}
+
+.capture-mode-tabs button {
+  padding: 10px 20px;
+  background: #eeeee9;
+  color: #47524c;
+  border: 0;
+  border-radius: 10px;
+  font: inherit;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.capture-mode-tabs button.active {
+  background: #1e684c;
+  color: white;
+}
+
+.panel {
+  background: #fffefa;
+  border: 1px solid #dddcd3;
+  border-radius: 18px;
+  box-shadow: 0 10px 35px rgba(23, 45, 37, 0.045);
+  padding: 24px;
+}
+
+.panel-title {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 22px;
+}
+
+.panel-title > span {
+  font-size: 11px;
+  color: #2a7758;
+  border: 1px solid #b9d8ca;
+  border-radius: 20px;
+  padding: 4px 7px;
+}
+
+.panel-title div {
+  display: grid;
+}
+
+.panel-title small {
+  color: #8a938e;
+  margin-top: 4px;
+}
+
+.editor-panel input,
+.editor-panel textarea {
+  width: 100%;
+  border: 1px solid #deded7;
+  background: #faf9f5;
+  border-radius: 11px;
+  padding: 13px;
+  font: inherit;
+  outline: none;
+}
+
+.editor-panel input:focus,
+.editor-panel textarea:focus {
+  border-color: #4d896f;
+  box-shadow: 0 0 0 3px #e5f0ea;
+}
+
+.editor-panel textarea {
+  height: 280px;
+  resize: vertical;
+  margin-top: 12px;
+  line-height: 1.7;
+}
+
+.editor-foot {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 14px;
+  color: #8a938e;
+  font-size: 13px;
+}
+
+main button {
+  background: #1e684c;
+  color: white;
+  padding: 11px 17px;
+  font-weight: 600;
+  border: 0;
+  border-radius: 10px;
+  font: inherit;
+  cursor: pointer;
+}
+
+main button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+main button.secondary {
+  background: #eeeee9 !important;
+  color: #47524c !important;
+}
+
+.step {
+  display: grid;
+  grid-template-columns: 34px 1fr 20px;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 0;
+  border-top: 1px solid #ecebe5;
+}
+
+.step i {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: #edf3ef;
+  color: #2c7256;
+  font-style: normal;
+  font-size: 12px;
+}
+
+.step div {
+  display: grid;
+}
+
+.step small {
+  color: #929a96;
+  margin-top: 3px;
+}
+
+.step strong {
+  color: #b8bdbb;
+}
+
+.step strong.done {
+  color: #259067;
+}
+
+.draft-panel {
+  grid-column: 1 / -1;
+}
+
+.draft-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+}
+
+.draft-head h2 {
+  margin: 10px 0 22px;
+}
+
+.tag {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: #e4f1ea;
+  color: #1e694c;
+}
+
+.safe {
+  color: #6e7b74;
+  font-size: 13px;
+}
+
+.coverage-summary {
+  padding: 14px;
+  background: #f5f4ef;
+  border-radius: 10px;
+  margin-bottom: 18px;
+}
+
+.coverage-summary b {
+  display: block;
+  margin-bottom: 6px;
+}
+
+.coverage-summary span {
+  color: #829087;
+  font-size: 13px;
+}
+
+.coverage-summary div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.coverage-summary em {
+  font-size: 12px;
+  font-style: normal;
+  background: white;
+  padding: 4px 8px;
+  border-radius: 6px;
+}
+
+.superseded-note {
+  padding: 12px;
+  background: #fff9e6;
+  border-radius: 8px;
+  color: #9a6c1a;
+  font-size: 13px;
+  margin-bottom: 18px;
+}
+
+.change {
+  display: grid;
+  grid-template-columns: 22px 1fr;
+  gap: 12px;
+  border-top: 1px solid #e5e5df;
+  padding: 20px 0;
+}
+
+.change input {
+  accent-color: #1e684c;
+  margin-top: 5px;
+}
+
+.change-body > div {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.change-body small {
+  color: #829087;
+}
+
+.change-body p {
+  color: #58645e;
+}
+
+.change-body pre {
+  white-space: pre-wrap;
+  background: #f5f4ef;
+  padding: 16px;
+  border-radius: 10px;
+  max-height: 260px;
+  overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  line-height: 1.6;
+}
+
+.change-body details {
+  color: #65726b;
+  font-size: 13px;
+}
+
+.change-body blockquote {
+  border-left: 2px solid #73a58f;
+  margin-left: 0;
+  padding-left: 12px;
+}
+
+.operation {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: #e4f1ea;
+  color: #1e694c;
+}
+
+.reprocess-box {
+  padding: 18px;
+  background: #f9f8f3;
+  border-radius: 12px;
+  margin-top: 18px;
+}
+
+.reprocess-box label {
+  display: grid;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.reprocess-box textarea {
+  width: 100%;
+  height: 120px;
+  border: 1px solid #deded7;
+  background: white;
+  border-radius: 10px;
+  padding: 12px;
+  font: inherit;
+  resize: vertical;
+}
+
+.reprocess-box small {
+  color: #929a96;
+  font-size: 12px;
+}
+
+.reprocess-box div {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.draft-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.error {
+  grid-column: 1 / -1;
+  padding: 14px 18px;
+  border-radius: 10px;
+  background: #fff0ed;
+  color: #a23c2d;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.error button {
+  background: #a23c2d !important;
+  color: white !important;
+}
+
+@media (max-width: 900px) {
+  .capture-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .draft-panel {
+    grid-column: auto;
+  }
+
+  .capture-header {
+    display: block;
+  }
+
+  .status {
+    display: inline-block;
+    margin-top: 18px;
+  }
+}

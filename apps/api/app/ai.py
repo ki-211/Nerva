@@ -11,6 +11,7 @@ from .prompts import (
     EXTRACT_KNOWLEDGE_PROMPT, EXTRACT_PROMPT_VERSION,
     OCR_IMAGE_PROMPT, OCR_PROMPT_VERSION,
     PLAN_MERGE_PROMPT, MERGE_PROMPT_VERSION,
+    EXTRACT_MEMORY_PROMPT, MEMORY_PROMPT_VERSION,
 )
 from .settings import settings
 
@@ -155,11 +156,12 @@ class AIAdapter(Protocol):
     def extract_inputs(
         self, inputs: list[SourceInput], source_label: str | None,
         *, source_context: str | None = None, analysis_instruction: str | None = None,
-        repair: bool = False,
+        memory_block: str = "", repair: bool = False,
     ) -> ExtractionResult: ...
     def plan_units(
         self, units: list[PlanningUnit], candidates: list[dict], source_label: str | None,
-        *, analysis_instruction: str | None = None, repair: bool = False,
+        *, analysis_instruction: str | None = None, memory_block: str = "",
+        repair: bool = False,
     ) -> list[MergeProposal]: ...
 
 
@@ -291,7 +293,7 @@ class LocalDemoAI:
     def extract_inputs(
         self, inputs: list[SourceInput], source_label: str | None,
         *, source_context: str | None = None, analysis_instruction: str | None = None,
-        repair: bool = False,
+        memory_block: str = "", repair: bool = False,
     ) -> ExtractionResult:
         units = []
         for item in inputs:
@@ -313,7 +315,8 @@ class LocalDemoAI:
 
     def plan_units(
         self, units: list[PlanningUnit], candidates: list[dict], source_label: str | None,
-        *, analysis_instruction: str | None = None, repair: bool = False,
+        *, analysis_instruction: str | None = None, memory_block: str = "",
+        repair: bool = False,
     ) -> list[MergeProposal]:
         groups: dict[int, list[PlanningUnit]] = {}
         for unit in units:
@@ -347,6 +350,14 @@ class LocalDemoAI:
     ) -> list[MergeProposal]:
         return self.plan_units(build_planning_units(extraction), candidates, requested_title)
 
+    def infer_preferences(
+        self, *, analysis_instruction: str | None, source_label: str | None,
+        recent_actions: list[dict] | None = None,
+    ):
+        """LocalDemoAI stub — no-op, returns empty inference list."""
+        from .schemas import MemoryInferenceResult
+        return MemoryInferenceResult(memories=[])
+
     def propose(self, content: str, requested_title: str | None, documents: list[dict]) -> MergeProposal:
         extraction = self.extract(content, requested_title)
         candidates = retrieve_candidates(content, requested_title, documents)
@@ -367,13 +378,19 @@ class BailianAI:
             headers={"Authorization": f"Bearer {settings.dashscope_api_key}", "Content-Type": "application/json"},
         )
 
-    def _chat(self, system_prompt: str, user_payload: dict, prompt_version: str) -> dict:
+    def _chat(
+        self, system_prompt: str, user_payload: dict, prompt_version: str,
+        *, memory_block: str = "",
+    ) -> dict:
         started = time.perf_counter()
+        # User preferences are appended after the task prompt so the evidence
+        # constraints above always take precedence over personalization.
+        full_prompt = f"{system_prompt}\n\n{memory_block}" if memory_block else system_prompt
         try:
             response = self.client.post(f"{self.base_url}/chat/completions", json={
                 "model": self.model,
                 "messages": [
-                    {"role": "system", "content": f"{system_prompt}\nReturn valid json only."},
+                    {"role": "system", "content": f"{full_prompt}\nReturn valid json only."},
                     {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
                 ],
                 "temperature": 0.1,
@@ -417,16 +434,21 @@ class BailianAI:
     def extract_inputs(
         self, inputs: list[SourceInput], source_label: str | None,
         *, source_context: str | None = None, analysis_instruction: str | None = None,
-        repair: bool = False,
+        memory_block: str = "", repair: bool = False,
     ) -> ExtractionResult:
-        raw = self._chat(EXTRACT_KNOWLEDGE_PROMPT, {
-            "task": "repair_missing_inputs" if repair else "extract_knowledge",
-            "source_label": source_label,
-            "source_context": source_context,
-            "analysis_instruction": analysis_instruction,
-            "source_inputs": [item.model_dump() for item in inputs],
-            "output_schema": ExtractionResult.model_json_schema(),
-        }, EXTRACT_PROMPT_VERSION)
+        raw = self._chat(
+            EXTRACT_KNOWLEDGE_PROMPT,
+            {
+                "task": "repair_missing_inputs" if repair else "extract_knowledge",
+                "source_label": source_label,
+                "source_context": source_context,
+                "analysis_instruction": analysis_instruction,
+                "source_inputs": [item.model_dump() for item in inputs],
+                "output_schema": ExtractionResult.model_json_schema(),
+            },
+            EXTRACT_PROMPT_VERSION,
+            memory_block=memory_block,
+        )
         try:
             return ExtractionResult.model_validate(raw)
         except ValidationError as exc:
@@ -437,20 +459,26 @@ class BailianAI:
 
     def plan_units(
         self, units: list[PlanningUnit], candidates: list[dict], source_label: str | None,
-        *, analysis_instruction: str | None = None, repair: bool = False,
+        *, analysis_instruction: str | None = None, memory_block: str = "",
+        repair: bool = False,
     ) -> list[MergeProposal]:
         trimmed_candidates = [{
             "id": item["id"], "title": item["title"], "version": item["version"],
             "markdown": item["markdown"][:6000],
         } for item in candidates]
-        raw = self._chat(PLAN_MERGE_PROMPT, {
-            "task": "repair_incomplete_plan" if repair else "plan_merge",
-            "source_label": source_label,
-            "analysis_instruction": analysis_instruction,
-            "new_units": [unit.model_dump() for unit in units],
-            "candidate_documents": trimmed_candidates,
-            "output_schema": MergePlan.model_json_schema(),
-        }, MERGE_PROMPT_VERSION)
+        raw = self._chat(
+            PLAN_MERGE_PROMPT,
+            {
+                "task": "repair_incomplete_plan" if repair else "plan_merge",
+                "source_label": source_label,
+                "analysis_instruction": analysis_instruction,
+                "new_units": [unit.model_dump() for unit in units],
+                "candidate_documents": trimmed_candidates,
+                "output_schema": MergePlan.model_json_schema(),
+            },
+            MERGE_PROMPT_VERSION,
+            memory_block=memory_block,
+        )
         try:
             plan = MergePlan.model_validate(raw)
         except ValidationError as exc:
@@ -474,6 +502,29 @@ class BailianAI:
         self, extraction: ExtractionResult, candidates: list[dict], requested_title: str | None,
     ) -> list[MergeProposal]:
         return self.plan_units(build_planning_units(extraction), candidates, requested_title)
+
+    def infer_preferences(
+        self, *, analysis_instruction: str | None, source_label: str | None,
+        recent_actions: list[dict] | None = None,
+    ):
+        """Infer reusable user preferences from the reprocess instruction."""
+        from .schemas import MemoryInferenceResult
+
+        raw = self._chat(
+            EXTRACT_MEMORY_PROMPT,
+            {
+                "task": "infer_user_preferences",
+                "analysis_instruction": analysis_instruction,
+                "source_label": source_label,
+                "recent_actions": recent_actions or [],
+                "output_schema": MemoryInferenceResult.model_json_schema(),
+            },
+            MEMORY_PROMPT_VERSION,
+        )
+        try:
+            return MemoryInferenceResult.model_validate(raw)
+        except ValidationError as exc:
+            raise AIProviderError("AI_SCHEMA_ERROR", "偏好推断结果未通过结构校验", retryable=True) from exc
 
 
 class LocalDemoOCR:

@@ -193,6 +193,35 @@ change_items = Table(
     CheckConstraint("confidence BETWEEN 0 AND 1", name="ck_change_items_confidence"),
 )
 
+user_memories = Table(
+    "user_memories", metadata,
+    Column("id", String(40), primary_key=True),
+    Column("user_id", String(40), ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+    Column("kind", String(30), nullable=False),
+    Column("content", Text, nullable=False),
+    Column("scope", String(30), nullable=False, server_default="global"),
+    Column("scope_ref", String(160)),
+    Column("status", String(20), nullable=False, server_default="candidate"),
+    Column("confidence", Float, nullable=False, server_default="1.0"),
+    Column("origin", String(20), nullable=False),
+    Column("use_count", Integer, nullable=False, server_default="0"),
+    Column("last_used_at", DateTime(timezone=True)),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    CheckConstraint(
+        "kind IN ('style', 'topic_split', 'domain', 'naming', 'merge_preference')",
+        name="ck_memories_kind",
+    ),
+    CheckConstraint("scope IN ('global', 'document', 'topic')", name="ck_memories_scope"),
+    CheckConstraint("status IN ('active', 'candidate', 'suppressed')", name="ck_memories_status"),
+    CheckConstraint(
+        "origin IN ('user_explicit', 'ai_inferred', 'ai_observed')",
+        name="ck_memories_origin",
+    ),
+    CheckConstraint("confidence BETWEEN 0 AND 1", name="ck_memories_confidence"),
+    CheckConstraint("use_count >= 0", name="ck_memories_use_count"),
+)
+
 knowledge_events = Table(
     "knowledge_events", metadata,
     Column("id", String(40), primary_key=True),
@@ -225,6 +254,8 @@ Index("idx_change_items_change_set", change_items.c.change_set_id)
 Index("idx_change_items_target_document", change_items.c.target_document_id)
 Index("idx_knowledge_events_created_at", knowledge_events.c.created_at.desc())
 Index("idx_knowledge_events_user_created", knowledge_events.c.user_id, knowledge_events.c.created_at.desc())
+Index("idx_memories_user_active", user_memories.c.user_id, user_memories.c.status, user_memories.c.kind)
+Index("idx_memories_user_created", user_memories.c.user_id, user_memories.c.created_at.desc())
 
 
 class Store:
@@ -1020,6 +1051,81 @@ class Store:
                 knowledge_events.c.user_id == user_id
             ).order_by(knowledge_events.c.created_at.desc())).mappings()
             return [dict(row) for row in rows]
+
+    def list_memories(self, user_id: str, *, status: str | None = None) -> list[dict]:
+        with self.engine.connect() as db:
+            query = select(user_memories).where(user_memories.c.user_id == user_id)
+            if status:
+                query = query.where(user_memories.c.status == status)
+            rows = db.execute(query.order_by(user_memories.c.created_at.desc())).mappings()
+            return [dict(row) for row in rows]
+
+    def get_memory(self, user_id: str, memory_id: str) -> dict | None:
+        with self.engine.connect() as db:
+            row = db.execute(select(user_memories).where(
+                user_memories.c.id == memory_id,
+                user_memories.c.user_id == user_id,
+            )).mappings().first()
+            return dict(row) if row else None
+
+    def create_memory(
+        self, user_id: str, *, kind: str, content: str, scope: str, scope_ref: str | None,
+        status: str, confidence: float, origin: str,
+    ) -> dict:
+        memory_id = new_id("mem")
+        created_at = now_utc()
+        with self.engine.begin() as db:
+            db.execute(insert(user_memories).values(
+                id=memory_id, user_id=user_id, kind=kind, content=content,
+                scope=scope, scope_ref=scope_ref, status=status,
+                confidence=confidence, origin=origin, use_count=0,
+                last_used_at=None, created_at=created_at, updated_at=created_at,
+            ))
+        memory = self.get_memory(user_id, memory_id)
+        assert memory is not None
+        return memory
+
+    def update_memory(
+        self, user_id: str, memory_id: str, *, content: str | None = None,
+        status: str | None = None, confidence: float | None = None,
+    ) -> dict | None:
+        updated_at = now_utc()
+        updates = {"updated_at": updated_at}
+        if content is not None:
+            updates["content"] = content
+        if status is not None:
+            updates["status"] = status
+        if confidence is not None:
+            updates["confidence"] = confidence
+        with self.engine.begin() as db:
+            result = db.execute(update(user_memories).where(
+                user_memories.c.id == memory_id,
+                user_memories.c.user_id == user_id,
+            ).values(**updates))
+            if result.rowcount != 1:
+                return None
+        return self.get_memory(user_id, memory_id)
+
+    def delete_memory(self, user_id: str, memory_id: str) -> bool:
+        with self.engine.begin() as db:
+            result = db.execute(delete(user_memories).where(
+                user_memories.c.id == memory_id,
+                user_memories.c.user_id == user_id,
+            ))
+            return result.rowcount == 1
+
+    def increment_memory_usage(self, user_id: str, memory_ids: list[str]) -> None:
+        if not memory_ids:
+            return
+        used_at = now_utc()
+        with self.engine.begin() as db:
+            db.execute(update(user_memories).where(
+                user_memories.c.user_id == user_id,
+                user_memories.c.id.in_(memory_ids),
+            ).values(
+                use_count=user_memories.c.use_count + 1,
+                last_used_at=used_at,
+            ))
 
 
 class DocumentVersionConflict(RuntimeError):

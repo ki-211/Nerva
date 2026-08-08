@@ -40,6 +40,42 @@ export type KnowledgeEvent = {
 
 export type User = { id: string; email: string; display_name: string };
 
+export type MemoryKind = 'style' | 'topic_split' | 'domain' | 'naming' | 'merge_preference';
+export type MemoryScope = 'global' | 'document' | 'topic';
+export type MemoryStatus = 'active' | 'candidate' | 'suppressed';
+export type MemoryOrigin = 'user_explicit' | 'ai_inferred' | 'ai_observed';
+
+export type Memory = {
+  id: string;
+  kind: MemoryKind;
+  content: string;
+  scope: MemoryScope;
+  scope_ref: string | null;
+  status: MemoryStatus;
+  confidence: number;
+  origin: MemoryOrigin;
+  use_count: number;
+  last_used_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type MemoryCreate = {
+  kind: MemoryKind;
+  content: string;
+  scope?: MemoryScope;
+  scope_ref?: string | null;
+  status?: MemoryStatus;
+  confidence?: number;
+  origin?: MemoryOrigin;
+};
+
+export type MemoryUpdate = {
+  content?: string;
+  status?: MemoryStatus;
+  confidence?: number;
+};
+
 export type SourceProcessing = {
   source_id: string;
   status: 'received' | 'processing' | 'proposed' | 'failed';

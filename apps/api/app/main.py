@@ -26,6 +26,7 @@ from .auth import (
     verification_code_hash,
 )
 from .mailer import send_registration_code
+from .memories import extract_memory_block, load_active_memories, plan_memory_block
 from .logging_config import configure_logging
 from .image_ingestion import (
     ImageValidationError, TemporaryImage, cleanup_job_directory,
@@ -39,7 +40,8 @@ from .exports import (
 from .prompts import EXTRACT_PROMPT_VERSION, MERGE_PROMPT_VERSION, OCR_PROMPT_VERSION
 from .schemas import (
     ApplyChangeSet, ChangeSet, Document, DocumentUpdate, DocumentVersion,
-    IngestionCreate, KnowledgeEvent, ReprocessSource, SourceProcessing,
+    IngestionCreate, KnowledgeEvent, Memory, MemoryCreate, MemoryUpdate,
+    ReprocessSource, SourceProcessing,
     CodeLoginRequest, SendVerificationCodeRequest, User,
 )
 from .settings import settings
@@ -226,11 +228,61 @@ def process_source(user_id: str, source_id: str):
     return run_knowledge_pipeline(user_id, source_id)
 
 
+def _try_infer_and_store_memories(ai, store, user_id: str, instruction: str, source_label: str | None):
+    """Infer user preferences from reprocess instruction and store as candidates.
+
+    Non-fatal: if inference fails, logs and continues without raising.
+    Deduplicates against existing candidate memories by kind+content.
+    """
+    try:
+        result = ai.infer_preferences(
+            analysis_instruction=instruction,
+            source_label=source_label,
+        )
+        if not result.memories:
+            return
+
+        # Deduplicate: load existing candidates to avoid creating duplicates
+        existing_candidates = store.list_memories(user_id, status="candidate")
+        existing_keys = {
+            (m["kind"], m["content"].strip().casefold())
+            for m in existing_candidates
+        }
+
+        for inferred in result.memories:
+            key = (inferred.kind, inferred.content.strip().casefold())
+            if key in existing_keys:
+                continue  # Skip duplicate
+            store.create_memory(
+                user_id,
+                kind=inferred.kind,
+                content=inferred.content,
+                scope="global",
+                scope_ref=None,
+                status="candidate",
+                confidence=inferred.confidence,
+                origin="ai_inferred",
+            )
+            logger.info(
+                "memory_inferred user_id=%s kind=%s confidence=%.2f reason=%r",
+                user_id, inferred.kind, inferred.confidence, inferred.reason,
+            )
+    except Exception as exc:
+        logger.warning("memory_inference_failed user_id=%s error=%r", user_id, exc)
+
+
 def run_knowledge_pipeline(user_id: str, source_id: str):
     source = store.get_source(user_id, source_id)
     if not source or source["processing_status"] != "processing":
         raise HTTPException(status.HTTP_409_CONFLICT, "Source is not available for processing")
     try:
+        # Load user preferences once upfront for both pipeline stages
+        active_memories = load_active_memories(store, user_id)
+        extract_prefs = extract_memory_block(active_memories)
+        plan_prefs = plan_memory_block(active_memories)
+        # Track which memories were used so we can increment use_count at the end
+        used_memory_ids = [m["id"] for m in active_memories if m["status"] == "active"]
+
         if source["kind"] == "image":
             source_context, persisted_inputs = split_ocr_text(
                 source["content"], source["total_inputs"],
@@ -247,7 +299,7 @@ def run_knowledge_pipeline(user_id: str, source_id: str):
         store.update_source_stage(user_id, source_id, "extracting")
         initial = ai.extract_inputs(
             inputs, source["title"], source_context=source_context,
-            analysis_instruction=instruction,
+            analysis_instruction=instruction, memory_block=extract_prefs,
         )
         extraction, missing_inputs = validate_extraction(initial, inputs)
         attempts = 1
@@ -262,7 +314,7 @@ def run_knowledge_pipeline(user_id: str, source_id: str):
             repair_inputs = [item for item in inputs if item.input_index in missing_set]
             repaired_raw = ai.extract_inputs(
                 repair_inputs, source["title"], source_context=source_context,
-                analysis_instruction=instruction, repair=True,
+                analysis_instruction=instruction, memory_block=extract_prefs, repair=True,
             )
             repaired, _ = validate_extraction(repaired_raw, repair_inputs)
             extraction = combine_extractions(extraction, repaired)
@@ -291,7 +343,8 @@ def run_knowledge_pipeline(user_id: str, source_id: str):
         store.update_source_stage(user_id, source_id, "planning")
         planning_units = build_planning_units(extraction)
         proposals = ai.plan_units(
-            planning_units, candidates, source["title"], analysis_instruction=instruction,
+            planning_units, candidates, source["title"],
+            analysis_instruction=instruction, memory_block=plan_prefs,
         )
         missing_refs = missing_proposal_refs(proposals, planning_units)
         if missing_refs:
@@ -299,7 +352,7 @@ def run_knowledge_pipeline(user_id: str, source_id: str):
             repair_units = [unit for unit in planning_units if unit.ref in missing_ref_set]
             proposals.extend(ai.plan_units(
                 repair_units, candidates, source["title"],
-                analysis_instruction=instruction, repair=True,
+                analysis_instruction=instruction, memory_block=plan_prefs, repair=True,
             ))
             missing_refs = missing_proposal_refs(proposals, planning_units)
         if missing_refs:
@@ -308,13 +361,22 @@ def run_knowledge_pipeline(user_id: str, source_id: str):
                 f"仍有 {len(missing_refs)} 个知识单元未进入变更草案",
                 retryable=True,
             )
-        return store.create_change_set_for_source(
+        # Increment use_count for all memories that were injected
+        store.increment_memory_usage(user_id, used_memory_ids)
+        change_set = store.create_change_set_for_source(
             user_id, source_id, proposals, extraction=extraction,
             supersedes_change_set_id=source.get("pending_supersedes_change_set_id"),
             analysis_instruction=instruction,
             covered_inputs=covered if source["kind"] == "image" else 0,
             extraction_attempts=attempts,
         )
+
+        # After a successful reprocess with an analysis_instruction, ask the AI to
+        # infer stable user preferences and write them as candidate memories for review.
+        if instruction and hasattr(ai, "infer_preferences"):
+            _try_infer_and_store_memories(ai, store, user_id, instruction, source["title"])
+
+        return change_set
     except ImageValidationError as exc:
         store.mark_source_failed(user_id, source_id, exc.code, str(exc))
         logger.warning("source input parsing failed source_id=%s error_code=%s", source_id, exc.code)
@@ -660,3 +722,54 @@ def update_document(document_id: str, payload: DocumentUpdate, user: dict = Depe
 @app.get("/v1/knowledge-events", response_model=list[KnowledgeEvent])
 def list_knowledge_events(user: dict = Depends(current_user)):
     return store.list_events(user["id"])
+
+
+@app.get("/v1/memories", response_model=list[Memory])
+def list_memories(
+    status: Literal["active", "candidate", "suppressed"] | None = None,
+    user: dict = Depends(current_user),
+):
+    return store.list_memories(user["id"], status=status)
+
+
+@app.post("/v1/memories", response_model=Memory, status_code=201)
+def create_memory(payload: MemoryCreate, user: dict = Depends(current_user)):
+    return store.create_memory(
+        user["id"],
+        kind=payload.kind,
+        content=payload.content,
+        scope=payload.scope,
+        scope_ref=payload.scope_ref,
+        status=payload.status,
+        confidence=payload.confidence,
+        origin=payload.origin,
+    )
+
+
+@app.get("/v1/memories/{memory_id}", response_model=Memory)
+def get_memory(memory_id: str, user: dict = Depends(current_user)):
+    result = store.get_memory(user["id"], memory_id)
+    if not result:
+        raise HTTPException(404, "Memory not found")
+    return result
+
+
+@app.patch("/v1/memories/{memory_id}", response_model=Memory)
+def update_memory(memory_id: str, payload: MemoryUpdate, user: dict = Depends(current_user)):
+    result = store.update_memory(
+        user["id"], memory_id,
+        content=payload.content,
+        status=payload.status,
+        confidence=payload.confidence,
+    )
+    if not result:
+        raise HTTPException(404, "Memory not found")
+    return result
+
+
+@app.delete("/v1/memories/{memory_id}", status_code=204)
+def delete_memory(memory_id: str, response: Response, user: dict = Depends(current_user)):
+    if not store.delete_memory(user["id"], memory_id):
+        raise HTTPException(404, "Memory not found")
+    response.status_code = status.HTTP_204_NO_CONTENT
+    return None

@@ -1,6 +1,6 @@
 import { ChangeEvent, DragEvent, useEffect, useRef, useState } from 'react';
-import { ApiError, api } from './api';
-import type { ChangeSet, SourceProcessing } from './types';
+import { ApiError, api } from '../../lib/api';
+import type { ChangeSet, SourceProcessing } from '../../lib/types';
 import './imageCapture.css';
 
 type SelectedImage = { id: string; file: File; previewUrl: string };

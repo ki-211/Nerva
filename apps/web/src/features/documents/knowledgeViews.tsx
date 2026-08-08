@@ -1,8 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { ApiError, api } from './api';
-import type { ChangeItem, ChangeSet, Document, DocumentVersion, KnowledgeEvent } from './types';
+import { ApiError, api } from '../../lib/api';
+import type { ChangeItem, ChangeSet, Document, DocumentVersion, KnowledgeEvent } from '../../lib/types';
+import '../../styles/knowledge.css';
 
 
 function headingId(children: React.ReactNode) {

@@ -1,4 +1,4 @@
-import type { ChangeSet, Document, DocumentVersion, KnowledgeEvent, SourceProcessing, User } from './types';
+import type { ChangeSet, Document, DocumentVersion, KnowledgeEvent, Memory, MemoryCreate, MemoryUpdate, SourceProcessing, User } from './types';
 
 const BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
@@ -137,4 +137,15 @@ export const api = {
     return download(`/v1/exports/knowledge-package?${query}`, 'nerva-knowledge-package.zip');
   },
   events: () => request<KnowledgeEvent[]>('/v1/knowledge-events'),
+  memories: (status?: 'active' | 'candidate' | 'suppressed') => {
+    const query = status ? `?status=${status}` : '';
+    return request<Memory[]>(`/v1/memories${query}`);
+  },
+  createMemory: (payload: MemoryCreate) => request<Memory>('/v1/memories', {
+    method: 'POST', body: JSON.stringify(payload),
+  }),
+  updateMemory: (id: string, payload: MemoryUpdate) => request<Memory>(`/v1/memories/${id}`, {
+    method: 'PATCH', body: JSON.stringify(payload),
+  }),
+  deleteMemory: (id: string) => request<void>(`/v1/memories/${id}`, { method: 'DELETE' }),
 };

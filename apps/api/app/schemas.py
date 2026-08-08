@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 
 ChangeOperation = Literal[
@@ -146,3 +146,53 @@ class KnowledgeEvent(BaseModel):
     accepted_count: int
     rejected_count: int
     origin: Literal["ai_ingestion", "manual_edit"]
+
+
+MemoryKind = Literal["style", "topic_split", "domain", "naming", "merge_preference"]
+MemoryScope = Literal["global", "document", "topic"]
+MemoryStatus = Literal["active", "candidate", "suppressed"]
+MemoryOrigin = Literal["user_explicit", "ai_inferred", "ai_observed"]
+
+
+class Memory(BaseModel):
+    id: str
+    kind: MemoryKind
+    content: str
+    scope: MemoryScope
+    scope_ref: str | None
+    status: MemoryStatus
+    confidence: float = Field(ge=0, le=1)
+    origin: MemoryOrigin
+    use_count: int = Field(ge=0)
+    last_used_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class MemoryCreate(BaseModel):
+    kind: MemoryKind
+    content: str = Field(min_length=1, max_length=2000)
+    scope: MemoryScope = "global"
+    scope_ref: str | None = Field(default=None, max_length=160)
+    status: MemoryStatus = "candidate"
+    confidence: float = Field(default=1.0, ge=0, le=1)
+    origin: MemoryOrigin = "user_explicit"
+
+
+class MemoryUpdate(BaseModel):
+    content: str | None = Field(default=None, min_length=1, max_length=2000)
+    status: MemoryStatus | None = None
+    confidence: float | None = Field(default=None, ge=0, le=1)
+
+
+class InferredMemory(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    kind: MemoryKind
+    content: str = Field(min_length=1, max_length=2000)
+    confidence: float = Field(ge=0.6, le=1.0)
+    reason: str = Field(min_length=1, max_length=1000)
+
+
+class MemoryInferenceResult(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    memories: list[InferredMemory] = Field(default_factory=list, max_length=10)
