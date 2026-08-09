@@ -8,7 +8,7 @@ import './chat.css';
 type Props = {
   sessionId: string | null;
   onOpenSession: (id: string) => void;
-  onOpenDocument: (id: string) => void;
+  onOpenDocument: (id: string, visibility: 'private' | 'public') => void;
   onOpenCapture: () => void;
   onAuthError: () => void;
 };
@@ -20,12 +20,13 @@ const GROUNDING_LABELS = {
   insufficient: '知识不足',
 };
 
-function draftMessage(id: string, sessionId: string, role: 'user' | 'assistant', content: string): ChatMessage {
+function draftMessage(id: string, sessionId: string, role: 'user' | 'assistant', content: string, includePublic = true): ChatMessage {
   return {
     id, session_id: sessionId, role,
     status: role === 'user' ? 'completed' : 'generating', content,
     model: null, grounding: null, citations: [], error_code: null,
     created_at: new Date().toISOString(), completed_at: role === 'user' ? new Date().toISOString() : null,
+    include_public: includePublic,
   };
 }
 
@@ -37,6 +38,7 @@ export function ChatPage({ sessionId, onOpenSession, onOpenDocument, onOpenCaptu
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState('');
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [includePublic, setIncludePublic] = useState(true);
   const abortRef = useRef<AbortController | null>(null);
   const skipMessageLoadRef = useRef<string | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
@@ -153,12 +155,12 @@ export function ChatPage({ sessionId, onOpenSession, onOpenDocument, onOpenCaptu
           return message;
         });
         if (optimistic && !next.some((message) => message.id === user_message_id)) {
-          next = [...next, { ...draftMessage(user_message_id, optimistic.sessionId, 'user', optimistic.content) }];
+          next = [...next, { ...draftMessage(user_message_id, optimistic.sessionId, 'user', optimistic.content, includePublic) }];
         }
         if (!next.some((message) => message.id === assistant_message_id)) {
           const targetSession = optimistic?.sessionId || sessionId;
           if (targetSession) {
-            next = [...next, draftMessage(assistant_message_id, targetSession, 'assistant', '')];
+            next = [...next, draftMessage(assistant_message_id, targetSession, 'assistant', '', includePublic)];
           }
         }
         return next;
@@ -201,8 +203,8 @@ export function ChatPage({ sessionId, onOpenSession, onOpenDocument, onOpenCaptu
     const assistantKey = { current: assistantTemp };
     setMessages((current) => [
       ...current,
-      draftMessage(userTemp, activeSessionId!, 'user', content),
-      draftMessage(assistantTemp, activeSessionId!, 'assistant', ''),
+      draftMessage(userTemp, activeSessionId!, 'user', content, includePublic),
+      draftMessage(assistantTemp, activeSessionId!, 'assistant', '', includePublic),
     ]);
     setInput('');
     setError('');
@@ -214,6 +216,7 @@ export function ChatPage({ sessionId, onOpenSession, onOpenDocument, onOpenCaptu
         activeSessionId, content,
         streamHandlers(assistantKey, { userKey: userTemp, sessionId: activeSessionId, content }),
         controller.signal,
+        includePublic,
       );
     } catch (cause) {
       if (cause instanceof DOMException && cause.name === 'AbortError') {
@@ -323,7 +326,7 @@ export function ChatPage({ sessionId, onOpenSession, onOpenDocument, onOpenCaptu
                 {!!message.citations.length && (
                   <div className="chat-sources">
                     {message.citations.map((source) => (
-                      <button key={source.ref} onClick={() => onOpenDocument(source.document_id)}>
+                      <button key={source.ref} onClick={() => onOpenDocument(source.document_id, source.visibility)}>
                         <b>[{source.ref}] {source.title}</b>
                         <small>{source.excerpt}</small>
                       </button>
@@ -356,6 +359,7 @@ export function ChatPage({ sessionId, onOpenSession, onOpenDocument, onOpenCaptu
 
         {error && <div className="chat-error" role="alert">{error}</div>}
         <div className="chat-composer">
+          <label className="chat-public-toggle"><input type="checkbox" checked={includePublic} onChange={(event) => setIncludePublic(event.target.checked)} disabled={streaming} /> 包含大众知识库</label>
           <textarea
             value={input}
             onChange={(event) => setInput(event.target.value)}

@@ -1,6 +1,7 @@
-import type { ChatMessage, ChatSession, ChatStreamHandlers, ChangeSet, Document, DocumentVersion, KnowledgeEvent, Memory, MemoryCreate, MemoryUpdate, SourceProcessing, User } from './types';
+import type { AdminUser, ChatMessage, ChatSession, ChatStreamHandlers, ChangeSet, Document, DocumentVersion, KnowledgeEvent, KnowledgeOwnership, Memory, MemoryCreate, MemoryUpdate, SearchResponse, SourceProcessing, User } from './types';
 
 const BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+const REQUEST_TIMEOUT_MS = 10_000;
 
 export class ApiError extends Error {
   constructor(
@@ -15,11 +16,24 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${BASE}${path}`, {
-    ...init,
-    credentials: 'include',
-    headers: { 'Content-Type': 'application/json', ...init?.headers },
-  });
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  let response: Response;
+  try {
+    response = await fetch(`${BASE}${path}`, {
+      ...init,
+      signal: init?.signal ?? controller.signal,
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json', ...init?.headers },
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw new ApiError('API 服务连接超时，请确认后端已启动', 0, 'API_TIMEOUT', undefined, true);
+    }
+    throw new ApiError('无法连接 API 服务，请确认后端已启动', 0, 'API_UNAVAILABLE', undefined, true);
+  } finally {
+    window.clearTimeout(timeout);
+  }
   if (!response.ok) {
     throw await responseError(response);
   }
@@ -162,6 +176,9 @@ export const api = {
   codeLogin: (email: string, verification_code: string) => request<User>('/v1/auth/code-login', {
     method: 'POST', body: JSON.stringify({ email, verification_code }),
   }),
+  adminLogin: (username: string, password: string) => request<User>('/v1/auth/admin-login', {
+    method: 'POST', body: JSON.stringify({ username, password }),
+  }),
   logout: () => request<void>('/v1/auth/logout', { method: 'POST' }),
   me: () => request<User>('/v1/auth/me'),
   createIngestion: (content: string, title?: string) => request<ChangeSet>('/v1/ingestions', {
@@ -182,6 +199,21 @@ export const api = {
   documents: () => request<Document[]>('/v1/documents'),
   document: (id: string) => request<Document>(`/v1/documents/${id}`),
   documentVersions: (id: string) => request<DocumentVersion[]>(`/v1/documents/${id}/versions`),
+  search: (query: string, limit = 8, includePublic = true) => {
+    const params = new URLSearchParams({ q: query, limit: String(limit), include_public: String(includePublic) });
+    return request<SearchResponse>(`/v1/search?${params}`);
+  },
+  publicDocuments: () => request<Document[]>('/v1/public-documents'),
+  publicDocument: (id: string) => request<Document>(`/v1/public-documents/${id}`),
+  adminUsers: () => request<AdminUser[]>('/v1/admin/users'),
+  knowledgeOwnership: () => request<KnowledgeOwnership[]>('/v1/admin/knowledge-ownership'),
+  adminDocument: (id: string) => request<Document>(`/v1/admin/documents/${id}`),
+  createPublicDocument: (title: string, markdown: string) => request<Document>('/v1/admin/public-documents', {
+    method: 'POST', body: JSON.stringify({ title, markdown }),
+  }),
+  updatePublicDocument: (id: string, payload: { title: string; markdown: string; base_version: number; reason?: string }) =>
+    request<Document>(`/v1/admin/public-documents/${id}`, { method: 'PUT', body: JSON.stringify(payload) }),
+  unpublishPublicDocument: (id: string) => request<Document>(`/v1/admin/public-documents/${id}`, { method: 'DELETE' }),
   updateDocument: (id: string, payload: { title: string; markdown: string; base_version: number; reason?: string }) =>
     request<Document>(`/v1/documents/${id}`, { method: 'PUT', body: JSON.stringify(payload) }),
   exportMarkdown: (scope: 'library' | 'document', documentId?: string, version?: number) => {
@@ -217,8 +249,8 @@ export const api = {
   deleteChatSession: (id: string) => request<void>(`/v1/chat/sessions/${id}`, { method: 'DELETE' }),
   chatMessages: (id: string) => request<ChatMessage[]>(`/v1/chat/sessions/${id}/messages`),
   sendChatMessage: (
-    id: string, content: string, handlers: ChatStreamHandlers, signal?: AbortSignal,
-  ) => streamChat(`/v1/chat/sessions/${id}/messages`, { content }, handlers, signal),
+    id: string, content: string, handlers: ChatStreamHandlers, signal?: AbortSignal, includePublic = true,
+  ) => streamChat(`/v1/chat/sessions/${id}/messages`, { content, include_public: includePublic }, handlers, signal),
   retryChatMessage: (
     messageId: string, handlers: ChatStreamHandlers, signal?: AbortSignal,
   ) => streamChat(`/v1/chat/messages/${messageId}/retry`, undefined, handlers, signal),

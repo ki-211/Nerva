@@ -1,17 +1,21 @@
 import hmac
+import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import (
     JSON, Boolean, CheckConstraint, Column, DateTime, Float, ForeignKey, Index,
-    Integer, MetaData, String, Table, Text, UniqueConstraint, create_engine,
+    Integer, MetaData, REAL, String, Table, Text, TypeDecorator, UniqueConstraint, create_engine,
     case, delete, func, insert, select, update,
 )
 from sqlalchemy.engine import URL
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 
 from .ai import ExtractionResult, MergeProposal
+
+
+logger = logging.getLogger("nerva.store")
 
 
 def now_utc() -> datetime:
@@ -25,15 +29,36 @@ def new_id(prefix: str) -> str:
 metadata = MetaData()
 LEGACY_USER_ID = "usr_legacy_local_migration"
 
+
+class EmbeddingVector(TypeDecorator):
+    """PostgreSQL REAL[] with JSON storage for the SQLite test store."""
+
+    impl = JSON
+    cache_ok = True
+
+    def load_dialect_impl(self, dialect):
+        if dialect.name == "postgresql":
+            return dialect.type_descriptor(ARRAY(REAL, dimensions=1, as_tuple=False))
+        return dialect.type_descriptor(JSON())
+
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return None
+        return [float(item) for item in value]
+
 users = Table(
     "users", metadata,
     Column("id", String(40), primary_key=True),
     Column("email", String(320), nullable=False, unique=True),
+    Column("username", String(80)),
     Column("display_name", String(80), nullable=False),
+    Column("password_hash", Text),
+    Column("role", String(20), nullable=False, server_default="user"),
     Column("status", String(20), nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
     CheckConstraint("status IN ('active', 'disabled')", name="ck_users_status"),
+    CheckConstraint("role IN ('user', 'admin')", name="ck_users_role"),
 )
 
 sessions = Table(
@@ -129,10 +154,37 @@ documents = Table(
     Column("user_id", String(40), ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
     Column("title", String(160), nullable=False),
     Column("markdown", Text, nullable=False),
+    Column("visibility", String(20), nullable=False, server_default="private"),
     Column("version", Integer, nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
     CheckConstraint("version >= 1", name="ck_documents_version"),
+    CheckConstraint("visibility IN ('private', 'public')", name="ck_documents_visibility"),
+)
+
+document_chunks = Table(
+    "document_chunks", metadata,
+    Column("id", String(40), primary_key=True),
+    Column("user_id", String(40), ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+    Column("document_id", String(40), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False),
+    Column("document_version", Integer, nullable=False),
+    Column("ordinal", Integer, nullable=False),
+    Column("content", Text, nullable=False),
+    Column("embedding", EmbeddingVector),
+    Column("embedding_model", String(160)),
+    Column("embedding_status", String(20), nullable=False, server_default="pending"),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    CheckConstraint("document_version >= 1", name="ck_document_chunks_version"),
+    CheckConstraint("ordinal >= 0", name="ck_document_chunks_ordinal"),
+    CheckConstraint(
+        "embedding_status IN ('pending', 'ready', 'failed')",
+        name="ck_document_chunks_embedding_status",
+    ),
+    UniqueConstraint(
+        "document_id", "document_version", "ordinal",
+        name="uq_document_chunks_document_version_ordinal",
+    ),
 )
 
 document_versions = Table(
@@ -239,6 +291,7 @@ chat_messages = Table(
     Column("role", String(20), nullable=False),
     Column("status", String(20), nullable=False),
     Column("content", Text, nullable=False),
+    Column("include_public", Boolean, nullable=False, server_default="1"),
     Column("model", String(160)),
     Column("grounding", String(30)),
     Column("citations", JSON().with_variant(JSONB, "postgresql"), nullable=False),
@@ -281,6 +334,11 @@ Index("idx_knowledge_units_source_input", knowledge_units.c.source_id, knowledge
 Index("idx_knowledge_units_user", knowledge_units.c.user_id, knowledge_units.c.created_at.desc())
 Index("idx_documents_user_updated", documents.c.user_id, documents.c.updated_at.desc())
 Index("idx_documents_updated_at", documents.c.updated_at.desc())
+Index("idx_documents_visibility_updated", documents.c.visibility, documents.c.updated_at.desc())
+Index("uq_users_username", users.c.username, unique=True)
+Index("idx_document_chunks_user", document_chunks.c.user_id, document_chunks.c.document_id)
+Index("idx_document_chunks_document_version", document_chunks.c.document_id, document_chunks.c.document_version, document_chunks.c.ordinal)
+Index("idx_document_chunks_user_status", document_chunks.c.user_id, document_chunks.c.embedding_status)
 Index("idx_document_versions_document", document_versions.c.document_id, document_versions.c.version.desc())
 Index("idx_change_sets_source", change_sets.c.source_id)
 Index("idx_change_sets_status_created", change_sets.c.status, change_sets.c.created_at.desc())
@@ -312,6 +370,7 @@ class Store:
             with self.engine.begin() as db:
                 db.execute(insert(users).values(
                     id=user_id, email=email, display_name=display_name,
+                    role="user", username=None, password_hash=None,
                     status="active",
                     created_at=created_at, updated_at=created_at,
                 ))
@@ -320,7 +379,7 @@ class Store:
                     users.c.status == "disabled",
                 )).first()
                 if legacy:
-                    for table in (sources, knowledge_units, documents, document_versions, change_sets, change_items, knowledge_events):
+                    for table in (sources, knowledge_units, documents, document_chunks, document_versions, change_sets, change_items, knowledge_events):
                         db.execute(update(table).where(table.c.user_id == LEGACY_USER_ID).values(user_id=user_id))
                     db.execute(delete(users).where(users.c.id == LEGACY_USER_ID))
         except IntegrityError:
@@ -340,6 +399,77 @@ class Store:
     def get_user_by_email(self, email: str) -> dict | None:
         with self.engine.connect() as db:
             row = db.execute(select(users).where(users.c.email == email)).mappings().first()
+            return dict(row) if row else None
+
+    def get_user_by_username(self, username: str) -> dict | None:
+        with self.engine.connect() as db:
+            row = db.execute(select(users).where(users.c.username == username)).mappings().first()
+            return dict(row) if row else None
+
+    def ensure_admin(
+        self, *, username: str, email: str, password_hash: str,
+        password_matches: bool = False,
+    ) -> bool:
+        """Create or synchronize the configured administrator at application startup.
+
+        Returns True when the stored password hash changed, allowing callers to
+        revoke existing administrator sessions.
+        """
+        now = now_utc()
+        with self.engine.begin() as db:
+            current = db.execute(select(users).where(users.c.username == username).with_for_update()).mappings().first()
+            if not current:
+                db.execute(insert(users).values(
+                    id=new_id("usr"), email=email, username=username,
+                    display_name="Administrator", password_hash=password_hash,
+                    role="admin", status="active", created_at=now, updated_at=now,
+                ))
+                return True
+            changed = not password_matches
+            values = {
+                "email": email, "display_name": "Administrator", "role": "admin",
+                "status": "active", "updated_at": now,
+            }
+            if changed:
+                values["password_hash"] = password_hash
+            db.execute(update(users).where(users.c.id == current["id"]).values(**values))
+            if changed:
+                db.execute(update(sessions).where(
+                    sessions.c.user_id == current["id"], sessions.c.revoked_at.is_(None),
+                ).values(revoked_at=now))
+            return changed
+
+    def list_users(self) -> list[dict]:
+        with self.engine.connect() as db:
+            query = select(
+                users.c.id, users.c.email, users.c.username, users.c.display_name,
+                users.c.role, users.c.status, users.c.created_at, users.c.updated_at,
+                func.count(documents.c.id).label("document_count"),
+                func.coalesce(func.sum(case((documents.c.visibility == "public", 1), else_=0)), 0).label("public_document_count"),
+            ).select_from(users.outerjoin(documents, documents.c.user_id == users.c.id)).group_by(
+                users.c.id,
+            ).order_by(users.c.created_at.desc())
+            rows = db.execute(query).mappings()
+            return [dict(row) for row in rows]
+
+    def list_knowledge_ownership(self) -> list[dict]:
+        with self.engine.connect() as db:
+            rows = db.execute(select(
+                documents.c.id, documents.c.user_id, documents.c.title,
+                documents.c.version, documents.c.visibility,
+                documents.c.created_at, documents.c.updated_at,
+                users.c.email.label("owner_email"),
+                users.c.display_name.label("owner_display_name"),
+            ).join(users, users.c.id == documents.c.user_id).order_by(
+                documents.c.updated_at.desc(), documents.c.id,
+            )).mappings()
+            return [dict(row) for row in rows]
+
+    def get_document_for_admin(self, document_id: str) -> dict | None:
+        with self.engine.connect() as db:
+            row = db.execute(select(documents).where(
+                documents.c.id == document_id,
+            )).mappings().first()
             return dict(row) if row else None
 
     def create_session(self, user_id: str, token_hash: str, expires_at: datetime) -> None:
@@ -413,25 +543,152 @@ class Store:
             ).order_by(documents.c.updated_at.desc())).mappings()
             return [dict(row) for row in rows]
 
+    def list_public_documents(self) -> list[dict]:
+        with self.engine.connect() as db:
+            rows = db.execute(select(documents).where(
+                documents.c.visibility == "public",
+            ).order_by(documents.c.updated_at.desc())).mappings()
+            return [dict(row) for row in rows]
+
+    def create_public_document(
+        self, user_id: str, *, title: str, markdown: str, document_id: str | None = None,
+    ) -> dict:
+        now = now_utc()
+        document_id = document_id or new_id("pub")
+        with self.engine.begin() as db:
+            db.execute(insert(documents).values(
+                id=document_id, user_id=user_id, title=title.strip(), markdown=markdown.strip(),
+                visibility="public", version=1, created_at=now, updated_at=now,
+            ))
+            db.execute(insert(document_versions).values(
+                id=new_id("ver"), user_id=user_id, document_id=document_id, version=1,
+                title=title.strip(), markdown=markdown.strip(), reason="创建大众知识库文档",
+                created_at=now,
+            ))
+        try:
+            self.stage_document_chunks(user_id, document_id)
+        except Exception:
+            logger.exception("public document chunk staging failed document_id=%s", document_id)
+        return self.get_document(user_id, document_id) or {}
+
+    def set_document_visibility(self, user_id: str, document_id: str, visibility: str) -> dict | None:
+        with self.engine.begin() as db:
+            result = db.execute(update(documents).where(
+                documents.c.id == document_id,
+                documents.c.user_id == user_id,
+            ).values(visibility=visibility, updated_at=now_utc()))
+            if result.rowcount != 1:
+                return None
+        return self.get_document(user_id, document_id)
+
     def get_document(self, user_id: str, document_id: str) -> dict | None:
         with self.engine.connect() as db:
             row = db.execute(select(documents).where(
                 documents.c.id == document_id,
-                documents.c.user_id == user_id,
+                (documents.c.user_id == user_id) | (documents.c.visibility == "public"),
             )).mappings().first()
             return dict(row) if row else None
+
+    def list_document_chunks(
+        self, user_id: str, *, document_id: str | None = None,
+        current_only: bool = True,
+    ) -> list[dict]:
+        query = select(document_chunks).where(document_chunks.c.user_id == user_id)
+        if document_id:
+            query = query.where(document_chunks.c.document_id == document_id)
+        if current_only:
+            query = query.join(
+                documents,
+                (documents.c.id == document_chunks.c.document_id)
+                & (documents.c.user_id == document_chunks.c.user_id),
+            ).where(document_chunks.c.document_version == documents.c.version)
+        query = query.order_by(document_chunks.c.document_id, document_chunks.c.ordinal)
+        with self.engine.connect() as db:
+            return [dict(row) for row in db.execute(query).mappings()]
+
+    def list_search_chunks(
+        self, user_id: str, document_id: str | None = None, *, include_public: bool = False,
+    ) -> list[dict]:
+        query = select(
+            document_chunks,
+            documents.c.title.label("document_title"),
+            documents.c.version.label("current_version"),
+            documents.c.visibility,
+        ).join(documents, documents.c.id == document_chunks.c.document_id).where(
+            ((document_chunks.c.user_id == user_id) | (documents.c.visibility == "public"))
+            if include_public else document_chunks.c.user_id == user_id,
+            document_chunks.c.document_version == documents.c.version,
+        )
+        if document_id:
+            query = query.where(document_chunks.c.document_id == document_id)
+        query = query.order_by(document_chunks.c.document_id, document_chunks.c.ordinal)
+        with self.engine.connect() as db:
+            return [dict(row) for row in db.execute(query).mappings()]
+
+    def replace_document_chunks(
+        self, user_id: str, document_id: str, document_version: int,
+        chunks: list[dict], *, embedding_model: str | None = None,
+    ) -> list[dict]:
+        now = now_utc()
+        with self.engine.begin() as db:
+            owned = db.execute(select(documents.c.id).where(
+                documents.c.id == document_id,
+                documents.c.user_id == user_id,
+                documents.c.version == document_version,
+            )).first()
+            if not owned:
+                return []
+            db.execute(delete(document_chunks).where(
+                document_chunks.c.user_id == user_id,
+                document_chunks.c.document_id == document_id,
+            ))
+            values = []
+            for ordinal, chunk in enumerate(chunks):
+                values.append({
+                    "id": chunk.get("id") or new_id("chk"),
+                    "user_id": user_id,
+                    "document_id": document_id,
+                    "document_version": document_version,
+                    "ordinal": ordinal,
+                    "content": chunk["content"],
+                    "embedding": chunk.get("embedding"),
+                    "embedding_model": embedding_model if chunk.get("embedding") is not None else None,
+                    "embedding_status": chunk.get("embedding_status", "ready" if chunk.get("embedding") is not None else "failed"),
+                    "created_at": now,
+                    "updated_at": now,
+                })
+            if values:
+                db.execute(insert(document_chunks), values)
+        return self.list_search_chunks(user_id, document_id)
+
+    def stage_document_chunks(self, user_id: str, document_id: str) -> list[dict]:
+        """Persist current-version text chunks before best-effort embedding runs."""
+        from .retrieval import chunk_markdown
+
+        document = self.get_document(user_id, document_id)
+        if not document:
+            return []
+        payload = [
+            {"content": content, "embedding_status": "pending"}
+            for content in chunk_markdown(document["title"], document["markdown"])
+        ]
+        return self.replace_document_chunks(
+            user_id, document_id, document["version"], payload,
+        )
 
     def list_document_versions(self, user_id: str, document_id: str) -> list[dict] | None:
         with self.engine.connect() as db:
             document = db.execute(select(documents.c.id).where(
                 documents.c.id == document_id,
-                documents.c.user_id == user_id,
+                (documents.c.user_id == user_id) | (documents.c.visibility == "public"),
             )).first()
             if not document:
                 return None
-            rows = db.execute(select(document_versions).where(
+            rows = db.execute(select(document_versions).join(
+                documents, documents.c.id == document_versions.c.document_id,
+            ).where(
                 document_versions.c.document_id == document_id,
-                document_versions.c.user_id == user_id,
+                (document_versions.c.user_id == user_id) | (documents.c.visibility == "public"),
             ).order_by(document_versions.c.version.desc())).mappings()
             return [dict(row) for row in rows]
 
@@ -942,6 +1199,7 @@ class Store:
             return None
         allowed = set(accepted_ids) if accepted_ids is not None else {item["id"] for item in change_set["items"]}
         affected: list[str] = []
+        affected_ids: set[str] = set()
         accepted = 0
         created_at = now_utc()
 
@@ -992,6 +1250,7 @@ class Store:
                         change_items.c.user_id == user_id,
                     ).values(target_document_id=document_id))
                     affected.append(item["target_title"])
+                    affected_ids.add(document_id)
                 elif item["operation"] == "ADD_BLOCK" and item["target_document_id"]:
                     current = db.execute(
                         select(documents).where(
@@ -1013,6 +1272,7 @@ class Store:
                             reason=item["reason"], created_at=created_at,
                         ))
                         affected.append(current["title"])
+                        affected_ids.add(current["id"])
 
             total = len(locked_items)
             status = "applied" if accepted == total else "partially_applied"
@@ -1026,6 +1286,11 @@ class Store:
                 affected_documents=affected, accepted_count=accepted,
                 rejected_count=total - accepted, created_at=created_at,
             ))
+        for document_id in affected_ids:
+            try:
+                self.stage_document_chunks(user_id, document_id)
+            except Exception:
+                logger.exception("text chunk staging failed document_id=%s", document_id)
         return self.get_change_set(user_id, change_set_id)
 
     def update_document(
@@ -1077,6 +1342,10 @@ class Store:
                 affected_documents=[title], accepted_count=1, rejected_count=0,
                 created_at=created_at,
             ))
+        try:
+            self.stage_document_chunks(user_id, document_id)
+        except Exception:
+            logger.exception("text chunk staging failed document_id=%s", document_id)
         return self.get_document(user_id, document_id)
 
     def list_events(self, user_id: str) -> list[dict]:
@@ -1242,7 +1511,10 @@ class Store:
             )).mappings().first()
             return dict(row) if row else None
 
-    def create_chat_turn(self, user_id: str, session_id: str, content: str, model: str) -> tuple[dict, dict] | None:
+    def create_chat_turn(
+        self, user_id: str, session_id: str, content: str, model: str,
+        include_public: bool = True,
+    ) -> tuple[dict, dict] | None:
         user_message_id = new_id("msg")
         assistant_message_id = new_id("msg")
         user_created_at = now_utc()
@@ -1268,12 +1540,14 @@ class Store:
                 {
                     "id": user_message_id, "user_id": user_id, "session_id": session_id,
                     "role": "user", "status": "completed", "content": content,
+                    "include_public": include_public,
                     "model": None, "grounding": None, "citations": [], "error_code": None,
                     "created_at": user_created_at, "completed_at": user_created_at,
                 },
                 {
                     "id": assistant_message_id, "user_id": user_id, "session_id": session_id,
                     "role": "assistant", "status": "generating", "content": "",
+                    "include_public": include_public,
                     "model": model, "grounding": None, "citations": [], "error_code": None,
                     "created_at": assistant_created_at, "completed_at": None,
                 },

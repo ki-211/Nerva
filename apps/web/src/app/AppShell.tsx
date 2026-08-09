@@ -12,10 +12,16 @@ type Props = {
   children: React.ReactNode;
 };
 
-export function AppShell({ user, documentCount, eventCount, libraryDirty, onSignOut, children }: Props) {
+export function AppShell({
+  user, documentCount, eventCount, libraryDirty, onSignOut, children,
+}: Props) {
   const navigate = useNavigate();
   const location = useLocation();
-  const view = location.pathname.startsWith('/library')
+  const view = location.pathname.startsWith('/search')
+    ? 'search'
+    : location.pathname.startsWith('/admin')
+    ? 'admin'
+    : location.pathname.startsWith('/library')
     ? 'library'
     : location.pathname.startsWith('/chat')
     ? 'chat'
@@ -47,11 +53,14 @@ export function AppShell({ user, documentCount, eventCount, libraryDirty, onSign
           ＋ 快速记录
         </button>
         <nav>
+          <button className={view === 'capture' ? 'active' : ''} onClick={() => go('/')}>
+            ✦ 知识录入
+          </button>
           <button className={view === 'chat' ? 'active' : ''} onClick={() => go('/chat')}>
             ◉ 与知识库对话
           </button>
-          <button className={view === 'capture' ? 'active' : ''} onClick={() => go('/')}>
-            ✦ 知识录入
+          <button className={view === 'search' ? 'active' : ''} onClick={() => go('/search')}>
+            ⌕ 知识检索
           </button>
           <button className={view === 'library' ? 'active' : ''} onClick={() => go('/library')}>
             ▤ 知识库 <em>{documentCount}</em>
@@ -62,6 +71,9 @@ export function AppShell({ user, documentCount, eventCount, libraryDirty, onSign
           <button className={view === 'memories' ? 'active' : ''} onClick={() => go('/memories')}>
             ✦ 个性化偏好
           </button>
+          {user.role === 'admin' && <button className={view === 'admin' ? 'active' : ''} onClick={() => go('/admin')}>
+            ⚙ 管理员控制台
+          </button>}
         </nav>
         <div className="account">
           <span>{user.display_name.slice(0, 2).toUpperCase()}</span>

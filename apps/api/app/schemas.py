@@ -19,10 +19,17 @@ class CodeLoginRequest(BaseModel):
     verification_code: str = Field(pattern=r"^\d{6}$")
 
 
+class AdminLoginRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    username: str = Field(min_length=1, max_length=80)
+    password: str = Field(min_length=1, max_length=200)
+
+
 class User(BaseModel):
     id: str
     email: EmailStr
     display_name: str
+    role: Literal["user", "admin"] = "user"
 
 
 class IngestionCreate(BaseModel):
@@ -112,6 +119,7 @@ class Document(BaseModel):
     version: int
     created_at: datetime
     updated_at: datetime
+    visibility: Literal["private", "public"] = "private"
 
 
 class DocumentVersion(BaseModel):
@@ -260,6 +268,7 @@ class ChatSessionUpdate(BaseModel):
 class ChatMessageCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     content: str = Field(min_length=1, max_length=4000)
+    include_public: bool = True
 
     @field_validator("content")
     @classmethod
@@ -275,6 +284,10 @@ class ChatCitation(BaseModel):
     document_id: str
     title: str
     excerpt: str
+    visibility: Literal["private", "public"] = "private"
+    chunk_id: str | None = None
+    document_version: int | None = None
+    retrieval_mode: Literal["hybrid", "keyword", "empty"] | None = None
 
 
 class ChatMessage(BaseModel):
@@ -289,3 +302,64 @@ class ChatMessage(BaseModel):
     error_code: str | None
     created_at: datetime
     completed_at: datetime | None
+    include_public: bool = True
+
+
+class SearchItem(BaseModel):
+    document_id: str
+    title: str
+    excerpt: str
+    document_version: int
+    chunk_id: str
+    matching_mode: Literal["hybrid", "keyword", "empty"]
+    score: float
+    visibility: Literal["private", "public"] = "private"
+
+
+class SearchResponse(BaseModel):
+    items: list[SearchItem]
+    retrieval_mode: Literal["hybrid", "keyword", "empty"]
+    fallback_reason: str | None = None
+
+
+class AdminUser(BaseModel):
+    id: str
+    email: EmailStr
+    username: str | None
+    display_name: str
+    role: Literal["user", "admin"]
+    status: Literal["active", "disabled"]
+    document_count: int = Field(ge=0)
+    public_document_count: int = Field(ge=0)
+    created_at: datetime
+    updated_at: datetime
+
+
+class KnowledgeOwnership(BaseModel):
+    id: str
+    user_id: str
+    owner_email: EmailStr
+    owner_display_name: str
+    title: str
+    version: int
+    visibility: Literal["private", "public"]
+    created_at: datetime
+    updated_at: datetime
+
+
+class PublicDocumentCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=160)
+    markdown: str = Field(min_length=1, max_length=100_000)
+
+    @field_validator("title", "markdown")
+    @classmethod
+    def reject_blank_public_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must not be blank")
+        return value.strip()
+
+
+class ReindexResponse(BaseModel):
+    document_id: str
+    chunks: int
+    status: Literal["completed"]

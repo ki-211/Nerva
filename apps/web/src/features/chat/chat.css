@@ -59,3 +59,5 @@
   .chat-composer { margin: 0 12px 12px; }
   .read-only { display: none; }
 }
+.chat-public-toggle { display: flex; align-items: center; gap: 7px; color: #475569; font-size: 13px; }
+.chat-public-toggle input { width: 16px; height: 16px; }

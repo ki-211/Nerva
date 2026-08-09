@@ -1,12 +1,18 @@
 -- Nerva PostgreSQL schema v1
 -- Run this file while connected to the `nerva` database.
+-- Administrator bootstrap example: username `admin`, password `admin`.
+-- Set NERVA_ADMIN_PASSWORD to a strong secret before production startup;
+-- the application hashes and synchronizes it rather than storing plaintext here.
 
 BEGIN;
 
 CREATE TABLE IF NOT EXISTS users (
     id VARCHAR(40) PRIMARY KEY,
     email VARCHAR(320) NOT NULL UNIQUE,
+    username VARCHAR(80) UNIQUE,
     display_name VARCHAR(80) NOT NULL,
+    password_hash TEXT,
+    role VARCHAR(20) NOT NULL DEFAULT 'user' CHECK (role IN ('user', 'admin')),
     status VARCHAR(20) NOT NULL CHECK (status IN ('active', 'disabled')),
     created_at TIMESTAMPTZ NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL
@@ -86,6 +92,7 @@ CREATE TABLE IF NOT EXISTS documents (
     user_id VARCHAR(40) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     title VARCHAR(160) NOT NULL,
     markdown TEXT NOT NULL,
+    visibility VARCHAR(20) NOT NULL DEFAULT 'private' CHECK (visibility IN ('private', 'public')),
     version INTEGER NOT NULL CHECK (version >= 1),
     created_at TIMESTAMPTZ NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL
@@ -194,6 +201,7 @@ CREATE TABLE IF NOT EXISTS chat_messages (
         status IN ('generating', 'completed', 'failed', 'cancelled')
     ),
     content TEXT NOT NULL,
+    include_public BOOLEAN NOT NULL DEFAULT TRUE,
     model VARCHAR(160),
     grounding VARCHAR(30) CHECK (
         grounding IS NULL OR grounding IN (
@@ -204,6 +212,21 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     error_code VARCHAR(80),
     created_at TIMESTAMPTZ NOT NULL,
     completed_at TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS document_chunks (
+    id VARCHAR(40) PRIMARY KEY,
+    user_id VARCHAR(40) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    document_id VARCHAR(40) NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    document_version INTEGER NOT NULL CHECK (document_version >= 1),
+    ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+    content TEXT NOT NULL,
+    embedding REAL[],
+    embedding_model VARCHAR(160),
+    embedding_status VARCHAR(20) NOT NULL DEFAULT 'pending' CHECK (embedding_status IN ('pending', 'ready', 'failed')),
+    created_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL,
+    UNIQUE (document_id, document_version, ordinal)
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions (user_id, expires_at DESC);
@@ -220,6 +243,7 @@ CREATE INDEX IF NOT EXISTS idx_knowledge_units_user
     ON knowledge_units (user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_documents_user_updated ON documents (user_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_documents_updated_at ON documents (updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_documents_visibility_updated ON documents (visibility, updated_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_document_versions_document
     ON document_versions (document_id, version DESC);
@@ -254,5 +278,11 @@ CREATE INDEX IF NOT EXISTS idx_chat_sessions_user_updated
 
 CREATE INDEX IF NOT EXISTS idx_chat_messages_session_created
     ON chat_messages (session_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_document_chunks_user
+    ON document_chunks (user_id, document_id);
+CREATE INDEX IF NOT EXISTS idx_document_chunks_document_version
+    ON document_chunks (document_id, document_version, ordinal);
+CREATE INDEX IF NOT EXISTS idx_document_chunks_user_status
+    ON document_chunks (user_id, embedding_status);
 
 COMMIT;

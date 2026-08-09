@@ -23,7 +23,7 @@ from .ai import (
 )
 from .auth import (
     authenticate_session, create_session, normalize_email, revoke_session,
-    verification_code_hash,
+    verification_code_hash, hash_password, verify_password,
 )
 from .mailer import send_registration_code
 from .memories import (
@@ -31,9 +31,10 @@ from .memories import (
     plan_memory_block,
 )
 from .chat import (
-    ChatStreamParser, build_chat_history, build_retrieval_query,
+    ChatStreamParser, build_chat_history,
     retrieve_chat_sources, should_infer_memory, sse_event, validated_citations,
 )
+from .retrieval import HybridRetriever, rebuild_document_index
 from .logging_config import configure_logging
 from .image_ingestion import (
     ImageValidationError, TemporaryImage, cleanup_job_directory,
@@ -49,8 +50,9 @@ from .schemas import (
     ApplyChangeSet, ChangeSet, Document, DocumentUpdate, DocumentVersion,
     ChatMessage, ChatMessageCreate, ChatSession, ChatSessionCreate, ChatSessionUpdate,
     IngestionCreate, KnowledgeEvent, Memory, MemoryCreate, MemoryUpdate,
-    ReprocessSource, SourceProcessing,
+    ReindexResponse, ReprocessSource, SearchResponse, SourceProcessing,
     CodeLoginRequest, SendVerificationCodeRequest, User,
+    AdminLoginRequest, AdminUser, KnowledgeOwnership, PublicDocumentCreate,
 )
 from .settings import settings
 from .store import ChatSessionBusy, DocumentVersionConflict, Store, now_utc
@@ -104,6 +106,12 @@ def current_user(request: Request) -> dict:
     return user
 
 
+def admin_user(user: dict = Depends(current_user)) -> dict:
+    if user.get("role") != "admin":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "管理员权限 required")
+    return user
+
+
 def _validate_export_scope(
     scope: Literal["library", "document"], document_id: str | None,
     version: int | None = None,
@@ -121,6 +129,17 @@ def _attachment_header(filename: str) -> str:
 
 @app.on_event("startup")
 def recover_interrupted_image_work() -> None:
+    configured_hash = hash_password(settings.admin_password)
+    existing = store.get_user_by_username(settings.admin_username)
+    password_matches = bool(existing and verify_password(settings.admin_password, existing.get("password_hash")))
+    password_changed = store.ensure_admin(
+        username=settings.admin_username,
+        email=settings.admin_email,
+        password_hash=configured_hash,
+        password_matches=password_matches,
+    )
+    if password_changed:
+        logger.info("administrator account synchronized username=%s password_changed=true", settings.admin_username)
     removed = cleanup_stale_directories()
     interrupted = store.fail_interrupted_image_sources()
     interrupted_chats = store.fail_interrupted_chat_messages()
@@ -173,8 +192,25 @@ def code_login(payload: CodeLoginRequest, response: Response):
     user = store.get_user_by_email(email)
     if user and user["status"] != "active":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "账号已停用")
+    if user and user.get("role") == "admin":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "管理员请使用管理员登录")
     if not user:
         user = store.create_user(email, email.split("@", 1)[0][:80])
+    set_session_cookie(response, create_session(store, user["id"]))
+    return user
+
+
+@app.post("/v1/auth/admin-login", response_model=User)
+def admin_login(payload: AdminLoginRequest, response: Response):
+    username = payload.username.strip()
+    user = store.get_user_by_username(username)
+    if (
+        not user
+        or user.get("role") != "admin"
+        or user.get("status") != "active"
+        or not verify_password(payload.password, user.get("password_hash"))
+    ):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "管理员账号或密码错误")
     set_session_cookie(response, create_session(store, user["id"]))
     return user
 
@@ -351,9 +387,22 @@ def run_knowledge_pipeline(user_id: str, source_id: str):
             source_id, covered, len(inputs), attempts,
         )
         store.update_source_stage(user_id, source_id, "retrieving")
-        candidates = retrieve_candidates_balanced(
-            inputs, source["title"], store.list_documents(user_id), limit=8,
-        )
+        documents_by_id = {item["id"]: item for item in store.list_documents(user_id)}
+        candidates: list[dict] = []
+        seen_candidate_ids: set[str] = set()
+        for input_item in inputs:
+            retrieval = HybridRetriever(store, ai).retrieve(
+                user_id, input_item.content, [source.get("title") or ""], final_count=8,
+            )
+            for chunk in retrieval.results:
+                document = documents_by_id.get(chunk["document_id"])
+                if document and document["id"] not in seen_candidate_ids:
+                    candidates.append(document)
+                    seen_candidate_ids.add(document["id"])
+        if not candidates:
+            candidates = retrieve_candidates_balanced(
+                inputs, source["title"], list(documents_by_id.values()), limit=8,
+            )
         store.update_source_stage(user_id, source_id, "planning")
         planning_units = build_planning_units(extraction)
         proposals = ai.plan_units(
@@ -638,12 +687,95 @@ def apply_change_set(change_set_id: str, payload: ApplyChangeSet, user: dict = D
     result = store.apply_change_set(user["id"], change_set_id, payload.accepted_item_ids)
     if not result:
         raise HTTPException(404, "Change set not found or is no longer applicable")
+    for item in result.get("items", []):
+        if (
+            item.get("accepted") and item.get("target_document_id")
+            and item.get("operation") in {"CREATE_DOCUMENT", "ADD_BLOCK"}
+        ):
+            try:
+                rebuild_document_index(store, user["id"], item["target_document_id"], ai)
+            except Exception:
+                logger.exception("document index rebuild failed document_id=%s", item["target_document_id"])
     return result
 
 
 @app.get("/v1/documents", response_model=list[Document])
 def list_documents(user: dict = Depends(current_user)):
     return store.list_documents(user["id"])
+
+
+@app.get("/v1/public-documents", response_model=list[Document])
+def list_public_documents(user: dict = Depends(current_user)):
+    return store.list_public_documents()
+
+
+@app.get("/v1/public-documents/{document_id}", response_model=Document)
+def get_public_document(document_id: str, user: dict = Depends(current_user)):
+    result = store.get_document(user["id"], document_id)
+    if not result or result.get("visibility") != "public":
+        raise HTTPException(404, "Public document not found")
+    return result
+
+
+@app.get("/v1/admin/users", response_model=list[AdminUser])
+def admin_users(user: dict = Depends(admin_user)):
+    return store.list_users()
+
+
+@app.get("/v1/admin/knowledge-ownership", response_model=list[KnowledgeOwnership])
+def admin_knowledge_ownership(user: dict = Depends(admin_user)):
+    return store.list_knowledge_ownership()
+
+
+@app.get("/v1/admin/documents/{document_id}", response_model=Document)
+def admin_document_detail(document_id: str, user: dict = Depends(admin_user)):
+    document = store.get_document_for_admin(document_id)
+    if not document:
+        raise HTTPException(404, "Document not found")
+    return document
+
+
+@app.get("/v1/admin/public-documents", response_model=list[Document])
+def admin_public_documents(user: dict = Depends(admin_user)):
+    return store.list_public_documents()
+
+
+@app.post("/v1/admin/public-documents", response_model=Document, status_code=201)
+def create_admin_public_document(payload: PublicDocumentCreate, user: dict = Depends(admin_user)):
+    return store.create_public_document(user["id"], title=payload.title, markdown=payload.markdown)
+
+
+@app.put("/v1/admin/public-documents/{document_id}", response_model=Document)
+def update_admin_public_document(
+    document_id: str, payload: DocumentUpdate, user: dict = Depends(admin_user),
+):
+    current = store.get_document(user["id"], document_id)
+    if not current or current.get("visibility") != "public":
+        raise HTTPException(404, "Public document not found")
+    try:
+        result = store.update_document(
+            user["id"], document_id, title=payload.title, markdown=payload.markdown,
+            base_version=payload.base_version, reason=payload.reason,
+        )
+    except DocumentVersionConflict as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail={
+            "message": "公共文档已在其他位置更新，请载入最新版本后再保存",
+            "code": "DOCUMENT_VERSION_CONFLICT", "current_version": exc.current_version,
+        }) from exc
+    if not result:
+        raise HTTPException(404, "Public document not found")
+    return result
+
+
+@app.delete("/v1/admin/public-documents/{document_id}", response_model=Document)
+def unpublish_admin_public_document(document_id: str, user: dict = Depends(admin_user)):
+    current = store.get_document(user["id"], document_id)
+    if not current or current.get("visibility") != "public":
+        raise HTTPException(404, "Public document not found")
+    result = store.set_document_visibility(user["id"], document_id, "private")
+    if not result:
+        raise HTTPException(404, "Public document not found")
+    return result
 
 
 @app.get("/v1/exports/markdown")
@@ -736,7 +868,48 @@ def update_document(document_id: str, payload: DocumentUpdate, user: dict = Depe
         }) from exc
     if not result:
         raise HTTPException(404, "Document not found")
+    if result["version"] != payload.base_version:
+        try:
+            rebuild_document_index(store, user["id"], document_id, ai)
+        except Exception:
+            logger.exception("document index rebuild failed document_id=%s", document_id)
     return result
+
+
+@app.post("/v1/documents/{document_id}/reindex", response_model=ReindexResponse)
+def reindex_document(document_id: str, user: dict = Depends(current_user)):
+    if not store.get_document(user["id"], document_id):
+        raise HTTPException(404, "Document not found")
+    chunks = rebuild_document_index(store, user["id"], document_id, ai)
+    return {"document_id": document_id, "chunks": len(chunks or []), "status": "completed"}
+
+
+@app.get("/v1/search", response_model=SearchResponse)
+def search_documents(
+    q: str = Query(..., min_length=1, max_length=4000),
+    limit: int = Query(8, ge=1, le=50),
+    include_public: bool = True,
+    user: dict = Depends(current_user),
+):
+    query = q.strip()
+    if not query:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "q must not be empty")
+    retrieval = HybridRetriever(store, ai).retrieve(
+        user["id"], query, final_count=limit, include_public=include_public,
+    )
+    return {
+        "items": [
+            {
+                "document_id": item["document_id"], "title": item["document_title"],
+                "excerpt": item["content"], "document_version": item["current_version"],
+                "chunk_id": item["id"], "matching_mode": retrieval.retrieval_mode,
+                "score": item.get("rerank_score", item.get("rrf_score", 0.0)),
+                "visibility": item.get("visibility", "private"),
+            } for item in retrieval.results
+        ],
+        "retrieval_mode": retrieval.retrieval_mode,
+        "fallback_reason": retrieval.fallback_reason,
+    }
 
 
 @app.get("/v1/knowledge-events", response_model=list[KnowledgeEvent])
@@ -802,8 +975,15 @@ def _chat_stream(user_id: str, user_message: dict, assistant_message: dict):
         messages = store.list_chat_messages(user_id, assistant_message["session_id"])
         if messages is None:
             raise RuntimeError("Chat session disappeared")
-        query = build_retrieval_query(messages)
-        sources = retrieve_chat_sources(query, store.list_documents(user_id), limit=5)
+        query = user_message["content"]
+        recent = [
+            item["content"] for item in messages
+            if item["role"] == "user" and item["id"] != user_message["id"]
+        ][-4:]
+        sources = retrieve_chat_sources(
+            query, limit=5, store=store, user_id=user_id, provider=ai, recent_messages=recent,
+            include_public=bool(user_message.get("include_public", True)),
+        )
         history = build_chat_history(messages)
         active_memories = load_active_memories(store, user_id)
         chat_memories = [item for item in active_memories if item["kind"] in {"domain", "style"}]
@@ -919,7 +1099,10 @@ def create_chat_message(
     session_id: str, payload: ChatMessageCreate, user: dict = Depends(current_user),
 ):
     try:
-        turn = store.create_chat_turn(user["id"], session_id, payload.content, ai.model)
+        turn = store.create_chat_turn(
+            user["id"], session_id, payload.content, ai.model,
+            include_public=payload.include_public,
+        )
     except ChatSessionBusy:
         raise HTTPException(status.HTTP_409_CONFLICT, detail={
             "message": "当前对话仍在生成回复", "code": "CHAT_ALREADY_GENERATING",

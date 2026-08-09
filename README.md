@@ -1,5 +1,18 @@
 # Nerva
 
+## 管理员与大众知识库
+
+Nerva 提供应用内大众知识库：所有已登录用户可以阅读，只有管理员可以新增、编辑和下架。管理员控制台还会展示用户及知识库归属，普通用户既看不到入口，也无法访问管理员 API。
+
+开发示例管理员为 `admin / admin`。复制 `.env.example` 后必须设置 `NERVA_ADMIN_PASSWORD`；生产上线前务必替换为强密码并通过部署平台 Secret 提供。API 每次启动会把数据库中的管理员密码哈希同步到当前环境变量值，密码变化时旧管理员会话会自动失效。真实密码不得写入 README、SQL、项目知识目录或 Git。
+
+初始化或补齐内置大众知识文章：
+
+```powershell
+python -m alembic -c alembic.ini upgrade head
+python scripts/seed_public_knowledge.py
+```
+
 > 让你的知识库随着每一次输入持续成长。
 
 Nerva 是一个开源的 AI 个人知识系统。它不会只把图片或文字转换成孤立笔记，而会检索已有知识、生成可审阅的合并草案，并记录知识如何发生变化。

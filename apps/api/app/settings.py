@@ -38,6 +38,20 @@ class Settings:
     ocr_model: str = os.getenv("NERVA_OCR_MODEL", "qwen3.5-ocr")
     embedding_model: str = os.getenv("NERVA_EMBEDDING_MODEL", "text-embedding-v4")
     rerank_model: str = os.getenv("NERVA_RERANK_MODEL", "qwen3-rerank")
+    embedding_base_url: str = os.getenv(
+        "NERVA_EMBEDDING_BASE_URL",
+        "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    )
+    rerank_base_url: str = os.getenv(
+        "NERVA_RERANK_BASE_URL",
+        "https://dashscope.aliyuncs.com/compatible-api/v1",
+    )
+    embedding_batch_size: int = int(os.getenv("NERVA_EMBEDDING_BATCH_SIZE", "10"))
+    embedding_timeout_seconds: float = float(os.getenv("NERVA_EMBEDDING_TIMEOUT_SECONDS", "30"))
+    rerank_timeout_seconds: float = float(os.getenv("NERVA_RERANK_TIMEOUT_SECONDS", "30"))
+    max_indexed_chunks_per_user: int = int(os.getenv("NERVA_MAX_INDEXED_CHUNKS_PER_USER", "20000"))
+    chunk_target_chars: int = int(os.getenv("NERVA_CHUNK_TARGET_CHARS", "900"))
+    chunk_overlap_chars: int = int(os.getenv("NERVA_CHUNK_OVERLAP_CHARS", "120"))
     database_url: str | None = os.getenv("DATABASE_URL") or None
     db_host: str = os.getenv("POSTGRES_HOST", "127.0.0.1")
     db_port: int = int(os.getenv("POSTGRES_PORT", "5432"))
@@ -56,6 +70,9 @@ class Settings:
         if value.strip()
     )
     verification_code_secret: str = os.getenv("NERVA_CODE_SECRET", "nerva-local-development-only")
+    admin_username: str = os.getenv("NERVA_ADMIN_USERNAME", "admin")
+    admin_password: str = os.getenv("NERVA_ADMIN_PASSWORD", "admin")
+    admin_email: str = os.getenv("NERVA_ADMIN_EMAIL", "admin@nerva.app")
     smtp_host: str | None = os.getenv("SMTP_HOST") or spring_mail.get("host") or None
     smtp_port: int = int(os.getenv("SMTP_PORT") or spring_mail.get("port") or 465)
     smtp_username: str | None = os.getenv("SMTP_USERNAME") or str(spring_mail.get("username") or "") or None
@@ -75,6 +92,18 @@ class Settings:
                 raise RuntimeError("NERVA_TEXT_MODEL is required when Bailian AI is enabled")
             if not self.ocr_model.strip():
                 raise RuntimeError("NERVA_OCR_MODEL is required when Bailian AI is enabled")
+            for name, value in (
+                ("NERVA_EMBEDDING_BASE_URL", self.embedding_base_url),
+                ("NERVA_RERANK_BASE_URL", self.rerank_base_url),
+            ):
+                if value and not value.startswith("https://"):
+                    raise RuntimeError(f"{name} must use HTTPS")
+        if self.embedding_batch_size < 1:
+            raise RuntimeError("NERVA_EMBEDDING_BATCH_SIZE must be positive")
+        if self.chunk_target_chars < 100 or not 0 <= self.chunk_overlap_chars < self.chunk_target_chars:
+            raise RuntimeError("chunk target/overlap configuration is invalid")
+        if self.max_indexed_chunks_per_user < 1:
+            raise RuntimeError("NERVA_MAX_INDEXED_CHUNKS_PER_USER must be positive")
 
     def sqlalchemy_url(self) -> str | URL:
         if self.database_url:

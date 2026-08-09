@@ -32,13 +32,13 @@ class MigrationBootstrapTest(unittest.TestCase):
         )
         return result.stdout + result.stderr
 
-    def test_empty_database_reaches_head_and_chat_migration_round_trips(self):
+    def test_empty_database_reaches_head_and_hybrid_migration_round_trips(self):
         with tempfile.TemporaryDirectory(prefix="nerva-migration-test-") as tempdir:
             database_path = Path(tempdir) / "empty.db"
             database_url = f"sqlite+pysqlite:///{database_path.as_posix()}"
 
             self.run_alembic(database_url, "upgrade", "head")
-            self.assertIn("0009 (head)", self.run_alembic(database_url, "current"))
+            self.assertIn("0011 (head)", self.run_alembic(database_url, "current"))
             self.assertIn(
                 "No new upgrade operations detected",
                 self.run_alembic(database_url, "check"),
@@ -56,6 +56,17 @@ class MigrationBootstrapTest(unittest.TestCase):
                     "idx_chat_messages_session_created",
                     {item["name"] for item in inspector.get_indexes("chat_messages")},
                 )
+                self.assertIn(
+                    "idx_document_chunks_user_status",
+                    {item["name"] for item in inspector.get_indexes("document_chunks")},
+                )
+            finally:
+                engine.dispose()
+
+            self.run_alembic(database_url, "downgrade", "0009")
+            engine = create_engine(database_url)
+            try:
+                self.assertNotIn("document_chunks", set(inspect(engine).get_table_names()))
             finally:
                 engine.dispose()
 

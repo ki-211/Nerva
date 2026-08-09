@@ -27,6 +27,12 @@ class BailianAITest(unittest.TestCase):
             validate=lambda: None,
             dashscope_base_url="https://example.test",
             text_model="test-model",
+            embedding_base_url="https://embedding.example.test/v1",
+            rerank_base_url="https://rerank.example.test/v1",
+            embedding_model="text-embedding-v4",
+            rerank_model="qwen3-rerank",
+            embedding_timeout_seconds=3,
+            rerank_timeout_seconds=3,
             **{"dashscope_api" + "_key": "test-value"},
         )
         client = httpx.Client(transport=httpx.MockTransport(handler))
@@ -48,6 +54,28 @@ class BailianAITest(unittest.TestCase):
 
         self.assertIs(captured["enable_thinking"], False)
         self.assertEqual(captured["response_format"], {"type": "json_object"})
+
+    def test_embedding_and_rerank_validate_dimensions_and_indices(self):
+        requests = []
+
+        def handler(request):
+            body = json.loads(request.content)
+            requests.append((request.url.path, body))
+            if request.url.path.endswith("/embeddings"):
+                return httpx.Response(200, request=request, json={
+                    "data": [{"index": 0, "embedding": [0.0] * 1024}],
+                })
+            return httpx.Response(200, request=request, json={
+                "results": [{"index": 0, "relevance_score": 0.9}],
+            })
+
+        ai = self.make_ai(handler)
+        self.assertEqual(len(ai.embed(["query"])[0]), 1024)
+        ranked = ai.rerank("query", [{"id": "chunk_1", "content": "candidate"}])
+        self.assertEqual(ranked[0]["id"], "chunk_1")
+        self.assertEqual(requests[0][1]["dimensions"], 1024)
+        self.assertEqual(requests[1][0], "/v1/reranks")
+        self.assertEqual(requests[1][1]["documents"], ["candidate"])
 
     def test_multiple_units_and_changes(self):
         responses = iter([

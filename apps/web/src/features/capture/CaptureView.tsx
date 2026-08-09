@@ -5,14 +5,16 @@ import type { ChangeSet, Document, KnowledgeEvent, SourceProcessing } from '../.
 import { ImageCapture } from './imageCapture';
 import { TextCapture } from './TextCapture';
 import { DraftPanel } from '../changes/DraftPanel';
+import { PublicKnowledgeSection } from '../documents/PublicKnowledgeSection';
 import './CaptureView.css';
 
 type Props = {
+  publicDocumentId: string | null;
   onRefresh: (docs: Document[], events: KnowledgeEvent[]) => void;
   onAuthError: () => void;
 };
 
-export function CaptureView({ onRefresh, onAuthError }: Props) {
+export function CaptureView({ publicDocumentId, onRefresh, onAuthError }: Props) {
   const navigate = useNavigate();
   const [title, setTitle] = useState('');
   const [content, setContent] = useState('');
@@ -226,6 +228,7 @@ export function CaptureView({ onRefresh, onAuthError }: Props) {
           </div>
         )}
       </div>
+      <PublicKnowledgeSection documentId={publicDocumentId} onAuthError={onAuthError} />
     </section>
   );
 }

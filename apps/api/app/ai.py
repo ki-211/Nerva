@@ -1,8 +1,10 @@
 import json
+import hashlib
 import logging
+import math
 import re
 import time
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -168,6 +170,9 @@ class AIAdapter(Protocol):
         self, history: list[dict], sources: list[dict], *, memory_block: str = "",
     ): ...
 
+    def embed(self, texts: list[str]) -> list[list[float]]: ...
+    def rerank(self, query: str, candidates: list[dict]) -> list[dict]: ...
+
 
 class OCRResult(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
@@ -182,6 +187,33 @@ class OCRAdapter(Protocol):
     model: str
 
     def recognize(self, data_url: str, *, source_id: str, sequence: int) -> OCRResult: ...
+
+
+def _local_vector(text: str, dimensions: int = 1024) -> list[float]:
+    """Stable, dependency-free embedding used by local mode and tests."""
+    values = [0.0] * dimensions
+    tokens = sorted(_keywords(text)) or [character for character in text.casefold() if not character.isspace()]
+    for token in tokens:
+        digest = hashlib.blake2b(token.encode("utf-8"), digest_size=8).digest()
+        position = int.from_bytes(digest[:4], "big") % dimensions
+        values[position] += 1.0 if digest[4] & 1 else -1.0
+    norm = math.sqrt(sum(value * value for value in values)) or 1.0
+    return [value / norm for value in values]
+
+
+def _validate_embedding_vectors(vectors: Any, expected: int = 1024) -> list[list[float]]:
+    if not isinstance(vectors, list) or any(not isinstance(vector, list) for vector in vectors):
+        raise ValueError("embedding response must contain a list of vectors")
+    normalized = []
+    for vector in vectors:
+        if len(vector) != expected or any(not isinstance(value, (int, float)) for value in vector):
+            raise ValueError(f"embedding vector must have {expected} numeric dimensions")
+        normalized.append([float(value) for value in vector])
+    return normalized
+
+
+def _candidate_terms(text: str) -> set[str]:
+    return _keywords(text)
 
 
 def retrieve_candidates(content: str, title: str | None, documents: list[dict], limit: int = 8) -> list[dict]:
@@ -395,6 +427,19 @@ class LocalDemoAI:
         for start in range(0, len(answer), 12):
             yield answer[start:start + 12]
 
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        return [_local_vector(text) for text in texts]
+
+    def rerank(self, query: str, candidates: list[dict]) -> list[dict]:
+        terms = _candidate_terms(query)
+        ranked = []
+        for candidate in candidates:
+            content_terms = _candidate_terms(candidate.get("content", ""))
+            overlap = len(terms & content_terms) / max(1, len(terms))
+            ranked.append({**candidate, "rerank_score": round(overlap, 6)})
+        ranked.sort(key=lambda item: (-item["rerank_score"], item.get("id", "")))
+        return ranked
+
     def propose(self, content: str, requested_title: str | None, documents: list[dict]) -> MergeProposal:
         extraction = self.extract(content, requested_title)
         candidates = retrieve_candidates(content, requested_title, documents)
@@ -410,10 +455,80 @@ class BailianAI:
             raise RuntimeError("DASHSCOPE_BASE_URL still contains a placeholder")
         self.model = settings.text_model
         self.base_url = settings.dashscope_base_url.rstrip("/")
+        self.embedding_base_url = settings.embedding_base_url.rstrip("/")
+        self.rerank_base_url = settings.rerank_base_url.rstrip("/")
+        self.embedding_model = settings.embedding_model
+        self.rerank_model = settings.rerank_model
+        self.embedding_timeout = settings.embedding_timeout_seconds
+        self.rerank_timeout = settings.rerank_timeout_seconds
         self.client = client or httpx.Client(
             timeout=httpx.Timeout(60.0, connect=10.0),
             headers={"Authorization": f"Bearer {settings.dashscope_api_key}", "Content-Type": "application/json"},
         )
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        base_url = self.embedding_base_url
+        try:
+            response = self.client.post(
+                f"{base_url}/embeddings",
+                json={"model": self.embedding_model, "input": texts,
+                      "dimensions": 1024, "encoding_format": "float"},
+                timeout=self.embedding_timeout,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            data = payload.get("data") if isinstance(payload, dict) else None
+            if not isinstance(data, list):
+                raise ValueError("missing embedding data")
+            ordered = sorted(data, key=lambda item: item.get("index", 0))
+            if len(ordered) != len(texts) or [item.get("index") for item in ordered] != list(range(len(texts))):
+                raise ValueError("embedding response indices are invalid")
+            return _validate_embedding_vectors([item["embedding"] for item in ordered])
+        except httpx.TimeoutException as exc:
+            raise AIProviderError("EMBEDDING_TIMEOUT", "Embedding 请求超时", retryable=True, status_code=503) from exc
+        except httpx.HTTPStatusError as exc:
+            code = "EMBEDDING_RATE_LIMITED" if exc.response.status_code == 429 else "EMBEDDING_UPSTREAM_ERROR"
+            raise AIProviderError(code, "Embedding 服务调用失败", retryable=True, status_code=503, upstream_status=exc.response.status_code) from exc
+        except (httpx.HTTPError, ValueError, KeyError, TypeError, IndexError) as exc:
+            raise AIProviderError("EMBEDDING_INVALID_RESPONSE", "Embedding 响应无效", retryable=True) from exc
+
+    def rerank(self, query: str, candidates: list[dict]) -> list[dict]:
+        base_url = self.rerank_base_url
+        ids = [str(item["id"]) for item in candidates]
+        try:
+            response = self.client.post(
+                f"{base_url}/reranks",
+                json={"model": self.rerank_model, "query": query,
+                      "documents": [item.get("content", "") for item in candidates],
+                      "top_n": len(candidates)},
+                timeout=self.rerank_timeout,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            results = payload.get("results") if isinstance(payload, dict) else None
+            if not isinstance(results, list):
+                raise ValueError("missing rerank results")
+            seen: set[str] = set()
+            normalized = []
+            for item in results:
+                item_id = str(item.get("id", item.get("index", "")))
+                if item_id.isdigit():
+                    index = int(item_id)
+                    item_id = ids[index] if 0 <= index < len(ids) else ""
+                if item_id not in ids or item_id in seen:
+                    raise ValueError("rerank returned unknown or duplicate id")
+                seen.add(item_id)
+                original = next(candidate for candidate in candidates if str(candidate["id"]) == item_id)
+                normalized.append({**original, "rerank_score": float(item.get("relevance_score", item.get("score", 0.0)))})
+            if len(normalized) != len(candidates):
+                raise ValueError("rerank result is incomplete")
+            return normalized
+        except httpx.TimeoutException as exc:
+            raise AIProviderError("RERANK_TIMEOUT", "Rerank 请求超时", retryable=True, status_code=503) from exc
+        except httpx.HTTPStatusError as exc:
+            raise AIProviderError("RERANK_UPSTREAM_ERROR", "Rerank 服务调用失败", retryable=True, status_code=503, upstream_status=exc.response.status_code) from exc
+        except (httpx.HTTPError, ValueError, KeyError, TypeError, IndexError) as exc:
+            raise AIProviderError("RERANK_INVALID_RESPONSE", "Rerank 响应无效", retryable=True) from exc
 
     def _chat(
         self, system_prompt: str, user_payload: dict, prompt_version: str,

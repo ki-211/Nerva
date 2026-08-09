@@ -9,6 +9,8 @@ import { CaptureView } from './features/capture/CaptureView';
 import { LibraryView, GrowthView } from './features/documents/knowledgeViews';
 import { MemoriesPage } from './features/memories/MemoriesPage';
 import { ChatPage } from './features/chat/ChatPage';
+import { SearchPage } from './features/search/SearchPage';
+import { AdminPage } from './features/admin/AdminPage';
 import { PrintExportPage } from './features/documents/exportViews';
 import './styles.css';
 
@@ -69,7 +71,11 @@ function KnowledgeApp({ user, onSignedOut }: { user: User; onSignedOut: () => vo
   const [libraryDirty, setLibraryDirty] = useState(false);
   const [busy, setBusy] = useState(false);
 
-  const view = location.pathname.startsWith('/library')
+  const view = location.pathname.startsWith('/search')
+    ? 'search'
+    : location.pathname.startsWith('/admin')
+    ? 'admin'
+    : location.pathname.startsWith('/library')
     ? 'library'
     : location.pathname.startsWith('/chat')
     ? 'chat'
@@ -85,6 +91,20 @@ function KnowledgeApp({ user, onSignedOut }: { user: User; onSignedOut: () => vo
     view === 'growth' ? decodeURIComponent(location.pathname.split('/')[2] || '') || null : null;
   const selectedChatSessionId =
     view === 'chat' ? decodeURIComponent(location.pathname.split('/')[2] || '') || null : null;
+  const selectedPublicDocumentId = new URLSearchParams(location.search).get('public_document');
+
+  useEffect(() => {
+    if (view === 'admin' && user.role !== 'admin') navigate('/', { replace: true });
+  }, [view, user.role, navigate]);
+
+  useEffect(() => {
+    if (!location.pathname.startsWith('/public-library')) return;
+    const legacyId = decodeURIComponent(location.pathname.split('/')[2] || '');
+    navigate(
+      legacyId ? `/?public_document=${encodeURIComponent(legacyId)}#public-knowledge` : '/#public-knowledge',
+      { replace: true },
+    );
+  }, [location.pathname, navigate]);
 
   useEffect(() => {
     Promise.all([api.documents(), api.events()])
@@ -131,15 +151,34 @@ function KnowledgeApp({ user, onSignedOut }: { user: User; onSignedOut: () => vo
       onSignOut={signOut}
     >
       {view === 'capture' && (
-        <CaptureView onRefresh={handleRefresh} onAuthError={handleAuthError} />
+        <CaptureView
+          publicDocumentId={selectedPublicDocumentId}
+          onRefresh={handleRefresh}
+          onAuthError={handleAuthError}
+        />
       )}
 
       {view === 'chat' && (
         <ChatPage
           sessionId={selectedChatSessionId}
           onOpenSession={(id) => navigate(id ? `/chat/${encodeURIComponent(id)}` : '/chat')}
-          onOpenDocument={(id) => navigate(`/library/${encodeURIComponent(id)}`)}
+          onOpenDocument={(id, visibility) => navigate(
+            visibility === 'public'
+              ? `/?public_document=${encodeURIComponent(id)}#public-knowledge`
+              : `/library/${encodeURIComponent(id)}`
+          )}
           onOpenCapture={() => navigate('/')}
+          onAuthError={handleAuthError}
+        />
+      )}
+
+      {view === 'search' && (
+        <SearchPage
+          onOpenDocument={(id, visibility) => navigate(
+            visibility === 'public'
+              ? `/?public_document=${encodeURIComponent(id)}#public-knowledge`
+              : `/library/${encodeURIComponent(id)}`
+          )}
           onAuthError={handleAuthError}
         />
       )}
@@ -156,6 +195,8 @@ function KnowledgeApp({ user, onSignedOut }: { user: User; onSignedOut: () => vo
           }}
         />
       )}
+
+      {view === 'admin' && user.role === 'admin' && <AdminPage user={user} onAuthError={handleAuthError} />}
 
       {view === 'growth' && (
         <GrowthView

@@ -27,10 +27,27 @@ export type ChangeSet = {
 
 export type Document = {
   id: string; title: string; markdown: string; version: number;
-  created_at: string; updated_at: string;
+  created_at: string; updated_at: string; visibility: 'private' | 'public';
 };
 export type DocumentVersion = {
   version: number; title: string; markdown: string; reason: string; created_at: string;
+};
+
+export type RetrievalMode = 'hybrid' | 'keyword' | 'empty';
+export type SearchItem = {
+  document_id: string;
+  title: string;
+  excerpt: string;
+  document_version: number;
+  chunk_id: string;
+  matching_mode: RetrievalMode;
+  score: number;
+  visibility: 'private' | 'public';
+};
+export type SearchResponse = {
+  items: SearchItem[];
+  retrieval_mode: RetrievalMode;
+  fallback_reason: string | null;
 };
 export type KnowledgeEvent = {
   id: string; created_at: string; title: string; summary: string;
@@ -38,7 +55,28 @@ export type KnowledgeEvent = {
   change_set_id: string; origin: 'ai_ingestion' | 'manual_edit';
 };
 
-export type User = { id: string; email: string; display_name: string };
+export type User = { id: string; email: string; display_name: string; role: 'user' | 'admin' };
+
+export type AdminUser = User & {
+  username: string | null;
+  status: 'active' | 'disabled';
+  document_count: number;
+  public_document_count: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type KnowledgeOwnership = {
+  id: string;
+  user_id: string;
+  owner_email: string;
+  owner_display_name: string;
+  title: string;
+  version: number;
+  visibility: 'private' | 'public';
+  created_at: string;
+  updated_at: string;
+};
 
 export type MemoryKind = 'style' | 'topic_split' | 'domain' | 'naming' | 'merge_preference';
 export type MemoryScope = 'global' | 'document' | 'topic';
@@ -103,6 +141,7 @@ export type ChatCitation = {
   document_id: string;
   title: string;
   excerpt: string;
+  visibility: 'private' | 'public';
 };
 
 export type ChatMessage = {
@@ -117,6 +156,7 @@ export type ChatMessage = {
   error_code: string | null;
   created_at: string;
   completed_at: string | null;
+  include_public: boolean;
   memory_candidates?: Memory[];
 };
 

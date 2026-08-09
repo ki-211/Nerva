@@ -6,6 +6,7 @@ import json
 import re
 
 from .ai import retrieve_candidates
+from .retrieval import HybridRetriever
 
 
 GROUNDINGS = {"knowledge", "knowledge_plus_general", "general", "insufficient"}
@@ -46,13 +47,35 @@ def _excerpt(markdown: str, query: str, max_length: int = 1200) -> str:
     return prefix + compact[start:end].strip() + suffix
 
 
-def retrieve_chat_sources(query: str, documents: list[dict], limit: int = 5) -> list[dict]:
-    ranked = retrieve_candidates(query, None, documents, limit=limit)
+def retrieve_chat_sources(query: str, documents: list[dict] | None = None, limit: int = 5,
+                          *, store=None, user_id: str | None = None, provider=None,
+                          recent_messages: list[str] | None = None,
+                          include_public: bool = False) -> list[dict]:
+    if store is not None and user_id and provider is not None:
+        retrieval = HybridRetriever(store, provider).retrieve(
+            user_id, query, recent_messages, final_count=min(limit * 2, 8),
+            include_public=include_public,
+        )
+        ranked = []
+        seen_documents: set[str] = set()
+        for item in retrieval.results:
+            if item["document_id"] in seen_documents:
+                continue
+            seen_documents.add(item["document_id"])
+            ranked.append(item)
+            if len(ranked) >= limit:
+                break
+        return [{
+            "ref": f"S{index}", "document_id": item["document_id"],
+            "title": item["document_title"], "excerpt": item["content"],
+            "chunk_id": item["id"], "document_version": item["current_version"],
+            "retrieval_mode": retrieval.retrieval_mode,
+            "visibility": item.get("visibility", "private"),
+        } for index, item in enumerate(ranked, start=1)]
+    ranked = retrieve_candidates(query, None, documents or [], limit=limit)
     return [{
-        "ref": f"S{index}",
-        "document_id": document["id"],
-        "title": document["title"],
-        "excerpt": _excerpt(document["markdown"], query),
+        "ref": f"S{index}", "document_id": document["id"],
+        "title": document["title"], "excerpt": _excerpt(document["markdown"], query),
     } for index, document in enumerate(ranked, start=1)]
 
 
