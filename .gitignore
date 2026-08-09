@@ -29,3 +29,8 @@ src-tauri/target/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Project knowledge is a maintained artifact even when a local excludes file hides it.
+!knowledge/
+!knowledge/**
+/knowledge/

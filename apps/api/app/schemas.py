@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 
 ChangeOperation = Literal[
@@ -170,19 +170,41 @@ class Memory(BaseModel):
 
 
 class MemoryCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     kind: MemoryKind
     content: str = Field(min_length=1, max_length=2000)
-    scope: MemoryScope = "global"
-    scope_ref: str | None = Field(default=None, max_length=160)
-    status: MemoryStatus = "candidate"
-    confidence: float = Field(default=1.0, ge=0, le=1)
-    origin: MemoryOrigin = "user_explicit"
+
+    @field_validator("content")
+    @classmethod
+    def normalize_content(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Memory content cannot be blank")
+        return value
 
 
 class MemoryUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     content: str | None = Field(default=None, min_length=1, max_length=2000)
     status: MemoryStatus | None = None
-    confidence: float | None = Field(default=None, ge=0, le=1)
+
+    @field_validator("content")
+    @classmethod
+    def normalize_optional_content(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError("Memory content cannot be blank")
+        return value
+
+    @model_validator(mode="after")
+    def require_change(self):
+        if self.content is None and self.status is None:
+            raise ValueError("At least one memory field must be provided")
+        return self
 
 
 class InferredMemory(BaseModel):
@@ -196,3 +218,74 @@ class InferredMemory(BaseModel):
 class MemoryInferenceResult(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     memories: list[InferredMemory] = Field(default_factory=list, max_length=10)
+
+
+ChatGrounding = Literal["knowledge", "knowledge_plus_general", "general", "insufficient"]
+ChatMessageStatus = Literal["generating", "completed", "failed", "cancelled"]
+
+
+class ChatSession(BaseModel):
+    id: str
+    title: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class ChatSessionCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    title: str = Field(default="新对话", min_length=1, max_length=80)
+
+    @field_validator("title")
+    @classmethod
+    def normalize_title(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Chat title cannot be blank")
+        return value
+
+
+class ChatSessionUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    title: str = Field(min_length=1, max_length=80)
+
+    @field_validator("title")
+    @classmethod
+    def normalize_title(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Chat title cannot be blank")
+        return value
+
+
+class ChatMessageCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    content: str = Field(min_length=1, max_length=4000)
+
+    @field_validator("content")
+    @classmethod
+    def normalize_content(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Chat message cannot be blank")
+        return value
+
+
+class ChatCitation(BaseModel):
+    ref: str
+    document_id: str
+    title: str
+    excerpt: str
+
+
+class ChatMessage(BaseModel):
+    id: str
+    session_id: str
+    role: Literal["user", "assistant"]
+    status: ChatMessageStatus
+    content: str
+    model: str | None
+    grounding: ChatGrounding | None
+    citations: list[ChatCitation]
+    error_code: str | None
+    created_at: datetime
+    completed_at: datetime | None

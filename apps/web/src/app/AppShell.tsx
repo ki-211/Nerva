@@ -17,6 +17,8 @@ export function AppShell({ user, documentCount, eventCount, libraryDirty, onSign
   const location = useLocation();
   const view = location.pathname.startsWith('/library')
     ? 'library'
+    : location.pathname.startsWith('/chat')
+    ? 'chat'
     : location.pathname.startsWith('/growth')
     ? 'growth'
     : location.pathname.startsWith('/memories')
@@ -45,6 +47,9 @@ export function AppShell({ user, documentCount, eventCount, libraryDirty, onSign
           ＋ 快速记录
         </button>
         <nav>
+          <button className={view === 'chat' ? 'active' : ''} onClick={() => go('/chat')}>
+            ◉ 与知识库对话
+          </button>
           <button className={view === 'capture' ? 'active' : ''} onClick={() => go('/')}>
             ✦ 知识录入
           </button>

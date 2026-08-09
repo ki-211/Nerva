@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { api } from '../../lib/api';
+import { ApiError, api } from '../../lib/api';
 import type { Memory, MemoryKind, MemoryStatus } from '../../lib/types';
 import './memories.css';
 
@@ -11,7 +11,11 @@ const KIND_LABELS: Record<MemoryKind, string> = {
   merge_preference: '合并策略',
 };
 
-export function MemoriesPage() {
+type Props = {
+  onAuthError: () => void;
+};
+
+export function MemoriesPage({ onAuthError }: Props) {
   const [memories, setMemories] = useState<Memory[]>([]);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState<string | null>(null);
@@ -19,41 +23,84 @@ export function MemoriesPage() {
   const [creating, setCreating] = useState(false);
   const [newKind, setNewKind] = useState<MemoryKind>('style');
   const [newContent, setNewContent] = useState('');
+  const [pending, setPending] = useState<string | null>(null);
+  const [error, setError] = useState('');
+
+  const handleError = (cause: unknown, fallback: string) => {
+    if (cause instanceof ApiError && cause.status === 401) {
+      onAuthError();
+      return;
+    }
+    setError(cause instanceof Error ? cause.message : fallback);
+  };
 
   useEffect(() => {
-    api.memories().then(setMemories).finally(() => setLoading(false));
-  }, []);
+    api.memories()
+      .then(setMemories)
+      .catch((cause) => handleError(cause, '偏好设置加载失败'))
+      .finally(() => setLoading(false));
+  }, [onAuthError]);
 
   const handleCreate = async () => {
     if (!newContent.trim()) return;
-    const created = await api.createMemory({
-      kind: newKind,
-      content: newContent.trim(),
-      status: 'active',
-      origin: 'user_explicit',
-    });
-    setMemories((prev) => [created, ...prev]);
-    setNewContent('');
-    setCreating(false);
+    setPending('create');
+    setError('');
+    try {
+      const created = await api.createMemory({
+        kind: newKind,
+        content: newContent.trim(),
+      });
+      setMemories((prev) => [created, ...prev]);
+      setNewContent('');
+      setCreating(false);
+    } catch (cause) {
+      handleError(cause, '偏好创建失败');
+    } finally {
+      setPending(null);
+    }
   };
 
   const handleSave = async (id: string) => {
     if (!editContent.trim()) return;
-    const updated = await api.updateMemory(id, { content: editContent.trim() });
-    setMemories((prev) => prev.map((m) => (m.id === id ? updated : m)));
-    setEditing(null);
+    setPending(id);
+    setError('');
+    try {
+      const updated = await api.updateMemory(id, { content: editContent.trim() });
+      setMemories((prev) => prev.map((m) => (m.id === id ? updated : m)));
+      setEditing(null);
+    } catch (cause) {
+      handleError(cause, '偏好保存失败');
+    } finally {
+      setPending(null);
+    }
   };
 
   const handleStatusToggle = async (id: string, currentStatus: MemoryStatus) => {
     const newStatus = currentStatus === 'active' ? 'suppressed' : 'active';
-    const updated = await api.updateMemory(id, { status: newStatus });
-    setMemories((prev) => prev.map((m) => (m.id === id ? updated : m)));
+    setPending(id);
+    setError('');
+    try {
+      const updated = await api.updateMemory(id, { status: newStatus });
+      setMemories((prev) => prev.map((m) => (m.id === id ? updated : m)));
+    } catch (cause) {
+      handleError(cause, '偏好状态更新失败');
+    } finally {
+      setPending(null);
+    }
   };
 
   const handleDelete = async (id: string) => {
     if (!window.confirm('确定删除这条记忆吗？')) return;
-    await api.deleteMemory(id);
-    setMemories((prev) => prev.filter((m) => m.id !== id));
+    setPending(id);
+    setError('');
+    try {
+      await api.deleteMemory(id);
+      setMemories((prev) => prev.filter((m) => m.id !== id));
+    } catch (cause) {
+      handleError(cause, '偏好删除失败');
+    } finally {
+      setPending(null);
+    }
   };
 
   const startEdit = (memory: Memory) => {
@@ -79,12 +126,14 @@ export function MemoriesPage() {
         </p>
       </header>
 
+      {error && <div className="memory-error" role="alert">{error}</div>}
+
       {candidateCount > 0 && (
         <div className="candidate-bar">
           <span className="icon">💡</span>
           <div>
             <b>AI 观察到 {candidateCount} 条新偏好</b>
-            <small>根据你的使用习惯生成，可激活或删除</small>
+            <small>根据你在重新分析时提出的要求生成，可激活或删除</small>
           </div>
         </div>
       )}
@@ -108,8 +157,8 @@ export function MemoriesPage() {
               autoFocus
             />
             <div className="actions">
-              <button onClick={handleCreate} disabled={!newContent.trim()}>
-                保存
+              <button onClick={handleCreate} disabled={!newContent.trim() || pending === 'create'}>
+                {pending === 'create' ? '保存中…' : '保存'}
               </button>
               <button onClick={() => setCreating(false)} className="cancel">
                 取消
@@ -143,8 +192,8 @@ export function MemoriesPage() {
                   autoFocus
                 />
                 <div className="actions">
-                  <button onClick={() => handleSave(memory.id)} disabled={!editContent.trim()}>
-                    保存
+                  <button onClick={() => handleSave(memory.id)} disabled={!editContent.trim() || pending === memory.id}>
+                    {pending === memory.id ? '保存中…' : '保存'}
                   </button>
                   <button onClick={() => setEditing(null)} className="cancel">
                     取消
@@ -159,11 +208,11 @@ export function MemoriesPage() {
                     {memory.use_count > 0 ? `已应用 ${memory.use_count} 次` : '尚未使用'}
                   </span>
                   <div className="memory-actions">
-                    <button onClick={() => startEdit(memory)}>编辑</button>
-                    <button onClick={() => handleStatusToggle(memory.id, memory.status)}>
+                    <button disabled={pending === memory.id} onClick={() => startEdit(memory)}>编辑</button>
+                    <button disabled={pending === memory.id} onClick={() => handleStatusToggle(memory.id, memory.status)}>
                       {memory.status === 'active' ? '停用' : '激活'}
                     </button>
-                    <button onClick={() => handleDelete(memory.id)} className="delete">
+                    <button disabled={pending === memory.id} onClick={() => handleDelete(memory.id)} className="delete">
                       删除
                     </button>
                   </div>

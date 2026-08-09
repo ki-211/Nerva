@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from html import escape
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -18,11 +19,17 @@ _KIND_LABELS: dict[str, str] = {
 }
 
 # Which kinds are injected into each pipeline stage
-_EXTRACT_KINDS = {"domain", "style"}
-_PLAN_KINDS    = {"topic_split", "naming", "merge_preference", "style"}
+_EXTRACT_KINDS = ("domain", "style")
+_PLAN_KINDS = ("style", "topic_split", "naming", "merge_preference")
+_CHAT_KINDS = ("domain", "style")
 
 
-def _format_block(memories: list[dict], kinds: set[str]) -> str:
+def normalize_memory_content(value: str) -> str:
+    """Return the stable comparison form used for per-user deduplication."""
+    return " ".join(value.split()).casefold()
+
+
+def _format_block(memories: list[dict], kinds: tuple[str, ...]) -> str:
     """Return the <user_preferences> block to prepend to a system prompt.
 
     Returns an empty string when there are no relevant active memories,
@@ -38,11 +45,14 @@ def _format_block(memories: list[dict], kinds: set[str]) -> str:
     for m in relevant:
         by_kind.setdefault(m["kind"], []).append(m["content"])
 
-    for kind, contents in by_kind.items():
+    for kind in kinds:
+        contents = by_kind.get(kind, [])
+        if not contents:
+            continue
         label = _KIND_LABELS.get(kind, kind)
         lines.append(f"[{label}]")
         for content in contents:
-            lines.append(f"- {content}")
+            lines.append(f"- {escape(content, quote=False)}")
 
     lines.append("</user_preferences>")
     lines.append(
@@ -61,6 +71,11 @@ def plan_memory_block(memories: list[dict]) -> str:
     return _format_block(memories, _PLAN_KINDS)
 
 
+def chat_memory_block(memories: list[dict]) -> str:
+    """Preference block for read-only knowledge chat."""
+    return _format_block(memories, _CHAT_KINDS)
+
+
 def load_active_memories(store: "Store", user_id: str) -> list[dict]:
     """Fetch all active memories for a user (cheap index-covered query)."""
-    return store.list_memories(user_id, status="active")
+    return store.list_memories(user_id, status="active", scope="global")

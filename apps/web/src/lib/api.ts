@@ -1,4 +1,4 @@
-import type { ChangeSet, Document, DocumentVersion, KnowledgeEvent, Memory, MemoryCreate, MemoryUpdate, SourceProcessing, User } from './types';
+import type { ChatMessage, ChatSession, ChatStreamHandlers, ChangeSet, Document, DocumentVersion, KnowledgeEvent, Memory, MemoryCreate, MemoryUpdate, SourceProcessing, User } from './types';
 
 const BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
@@ -61,6 +61,65 @@ async function download(path: string, fallbackFilename: string): Promise<void> {
   anchor.click();
   anchor.remove();
   window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+}
+
+async function streamChat(
+  path: string, body: object | undefined, handlers: ChatStreamHandlers, signal?: AbortSignal,
+): Promise<void> {
+  const response = await fetch(`${BASE}${path}`, {
+    method: 'POST', credentials: 'include', signal,
+    headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (!response.ok) throw await responseError(response);
+  if (!response.body) throw new ApiError('浏览器不支持流式响应', 0, 'CHAT_STREAM_UNAVAILABLE');
+  if (!response.headers.get('Content-Type')?.includes('text/event-stream')) {
+    throw new ApiError('对话服务返回了非流式响应', 0, 'CHAT_STREAM_INVALID_CONTENT_TYPE', undefined, true);
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let terminalEventReceived = false;
+
+  const handleBlock = (block: string) => {
+    let event = '';
+    let data = '';
+    for (const line of block.split(/\r?\n/)) {
+      if (line.startsWith('event:')) event = line.slice(6).trim();
+      if (line.startsWith('data:')) data += line.slice(5).trim();
+    }
+    if (!event || !data) return;
+    let payload: any;
+    try {
+      payload = JSON.parse(data);
+    } catch {
+      throw new ApiError('对话流数据格式无效', 0, 'CHAT_STREAM_INVALID_EVENT', undefined, true);
+    }
+    if (event === 'start') handlers.onStart(payload);
+    if (event === 'delta') handlers.onDelta(payload.text || '');
+    if (event === 'memory_candidates') handlers.onMemoryCandidates(payload.memories || []);
+    if (event === 'done') {
+      terminalEventReceived = true;
+      handlers.onDone(payload.message);
+    }
+    if (event === 'error') {
+      terminalEventReceived = true;
+      handlers.onError(payload);
+    }
+  };
+
+  while (true) {
+    const { value, done } = await reader.read();
+    buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+    const blocks = buffer.split(/\r?\n\r?\n/);
+    buffer = blocks.pop() || '';
+    blocks.forEach(handleBlock);
+    if (done) break;
+  }
+  if (buffer.trim()) handleBlock(buffer);
+  if (!terminalEventReceived) {
+    throw new ApiError('对话连接提前中断，请重试', 0, 'CHAT_STREAM_INTERRUPTED', undefined, true);
+  }
 }
 
 function uploadImages(
@@ -148,4 +207,19 @@ export const api = {
     method: 'PATCH', body: JSON.stringify(payload),
   }),
   deleteMemory: (id: string) => request<void>(`/v1/memories/${id}`, { method: 'DELETE' }),
+  chatSessions: () => request<ChatSession[]>('/v1/chat/sessions'),
+  createChatSession: (title = '新对话') => request<ChatSession>('/v1/chat/sessions', {
+    method: 'POST', body: JSON.stringify({ title }),
+  }),
+  updateChatSession: (id: string, title: string) => request<ChatSession>(`/v1/chat/sessions/${id}`, {
+    method: 'PATCH', body: JSON.stringify({ title }),
+  }),
+  deleteChatSession: (id: string) => request<void>(`/v1/chat/sessions/${id}`, { method: 'DELETE' }),
+  chatMessages: (id: string) => request<ChatMessage[]>(`/v1/chat/sessions/${id}/messages`),
+  sendChatMessage: (
+    id: string, content: string, handlers: ChatStreamHandlers, signal?: AbortSignal,
+  ) => streamChat(`/v1/chat/sessions/${id}/messages`, { content }, handlers, signal),
+  retryChatMessage: (
+    messageId: string, handlers: ChatStreamHandlers, signal?: AbortSignal,
+  ) => streamChat(`/v1/chat/messages/${messageId}/retry`, undefined, handlers, signal),
 };

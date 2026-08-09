@@ -177,6 +177,48 @@ class BailianAITest(unittest.TestCase):
             missing_proposal_refs([proposal], [unit])
         self.assertEqual(caught.exception.code, "AI_INVALID_UNIT_REF")
 
+    def test_stream_chat_parses_sse_and_uses_safe_stream_options(self):
+        captured = {}
+
+        def handler(request):
+            captured.update(json.loads(request.content))
+            body = "\n".join([
+                'data: {"choices":[{"delta":{"content":"GROUNDING: knowledge\\n"}}],"usage":null}',
+                'data: {"choices":[{"delta":{"content":"答案 [S1]"}}],"usage":null}',
+                'data: {"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":4}}',
+                'data: [DONE]',
+                '',
+            ])
+            return httpx.Response(200, request=request, text=body)
+
+        ai = self.make_ai(handler)
+        parts = list(ai.stream_chat(
+            [{"role": "user", "content": "问题"}],
+            [{"ref": "S1", "title": "文档", "excerpt": "答案"}],
+            memory_block="<user_preferences />",
+        ))
+        self.assertEqual("".join(parts), "GROUNDING: knowledge\n答案 [S1]")
+        self.assertIs(captured["stream"], True)
+        self.assertEqual(captured["stream_options"], {"include_usage": True})
+        self.assertIs(captured["enable_thinking"], False)
+        self.assertIn("REFERENCE_MATERIAL", captured["messages"][1]["content"])
+        self.assertNotIn("response_format", captured)
+
+    def test_stream_chat_maps_upstream_and_invalid_chunk_errors(self):
+        limited = self.make_ai(lambda request: httpx.Response(
+            429, request=request, json={"error": {"code": "Throttling", "message": "slow"}},
+        ))
+        with self.assertRaises(AIProviderError) as caught:
+            list(limited.stream_chat([{"role": "user", "content": "q"}], []))
+        self.assertEqual(caught.exception.code, "AI_RATE_LIMITED")
+
+        invalid = self.make_ai(lambda request: httpx.Response(
+            200, request=request, text="data: not-json\n\n",
+        ))
+        with self.assertRaises(AIProviderError) as caught:
+            list(invalid.stream_chat([{"role": "user", "content": "q"}], []))
+        self.assertEqual(caught.exception.code, "AI_INVALID_RESPONSE")
+
 
 class BailianOCRTest(unittest.TestCase):
     def make_ocr(self, handler):

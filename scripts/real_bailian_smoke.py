@@ -1,7 +1,14 @@
-"""Run a small real two-stage Bailian call without printing source or credentials."""
+"""Run a synthetic real Bailian text smoke without printing content or credentials."""
 
+import os
+import sys
 import tempfile
+import logging
 from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from apps.api.app.ai import AIProviderError, BailianAI, retrieve_candidates
 from apps.api.app.logging_config import configure_logging
@@ -10,10 +17,13 @@ from apps.api.app.store import Store
 
 
 def main() -> None:
+    if os.getenv("NERVA_RUN_REAL_BAILIAN_SMOKE") != "1":
+        raise SystemExit("Set NERVA_RUN_REAL_BAILIAN_SMOKE=1 to run the real Bailian smoke")
     configure_logging()
+    logging.disable(logging.CRITICAL)
     ai = BailianAI()
-    content = "Nerva 是一个个人知识系统。新输入必须先生成可审批的变更草案，批准后才修改正式文档。"
-    title = "Nerva 审批原则"
+    content = "合成系统 Orion 的知识变更必须先生成待审批草案，审批通过后才修改正式文档。"
+    title = "合成审批规则"
     with tempfile.TemporaryDirectory() as tempdir:
         store = Store(f"sqlite+pysqlite:///{(Path(tempdir) / 'smoke.db').as_posix()}")
         try:
@@ -30,7 +40,7 @@ def main() -> None:
             draft = store.create_change_set_for_source(user["id"], source["id"], proposals)
             applied = store.apply_change_set(user["id"], draft["id"], None)
             print({
-                "provider": ai.provider, "model": ai.model,
+                "model": ai.model,
                 "units": len(extraction.units), "changes": len(proposals),
                 "operations": [item.operation for item in proposals],
                 "draft_status": draft["status"], "applied_status": applied["status"],
@@ -38,19 +48,7 @@ def main() -> None:
                 "events": len(store.list_events(user["id"])),
             })
         except AIProviderError as exc:
-            response = getattr(exc.__cause__, "response", None)
-            upstream = None
-            if response is not None:
-                try:
-                    upstream_error = response.json().get("error", {})
-                    upstream = {
-                        "code": upstream_error.get("code"),
-                        "message": upstream_error.get("message"),
-                        "param": upstream_error.get("param"),
-                    }
-                except ValueError:
-                    upstream = {"code": "non-json-error"}
-            print({"error": exc.code, "upstream": upstream})
+            print({"error": exc.code, "upstream_status": exc.upstream_status})
             raise SystemExit(1) from exc
         finally:
             store.close()

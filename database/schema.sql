@@ -157,6 +157,55 @@ CREATE TABLE IF NOT EXISTS knowledge_events (
     created_at TIMESTAMPTZ NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS user_memories (
+    id VARCHAR(40) PRIMARY KEY,
+    user_id VARCHAR(40) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    kind VARCHAR(30) NOT NULL CHECK (
+        kind IN ('style', 'topic_split', 'domain', 'naming', 'merge_preference')
+    ),
+    content TEXT NOT NULL,
+    scope VARCHAR(30) NOT NULL CHECK (scope IN ('global', 'document', 'topic')),
+    scope_ref VARCHAR(160),
+    status VARCHAR(20) NOT NULL CHECK (status IN ('active', 'candidate', 'suppressed')),
+    confidence DOUBLE PRECISION NOT NULL DEFAULT 1.0 CHECK (confidence BETWEEN 0 AND 1),
+    origin VARCHAR(20) NOT NULL CHECK (
+        origin IN ('user_explicit', 'ai_inferred', 'ai_observed')
+    ),
+    use_count INTEGER NOT NULL DEFAULT 0 CHECK (use_count >= 0),
+    last_used_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS chat_sessions (
+    id VARCHAR(40) PRIMARY KEY,
+    user_id VARCHAR(40) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    title VARCHAR(80) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id VARCHAR(40) PRIMARY KEY,
+    user_id VARCHAR(40) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    session_id VARCHAR(40) NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+    role VARCHAR(20) NOT NULL CHECK (role IN ('user', 'assistant')),
+    status VARCHAR(20) NOT NULL CHECK (
+        status IN ('generating', 'completed', 'failed', 'cancelled')
+    ),
+    content TEXT NOT NULL,
+    model VARCHAR(160),
+    grounding VARCHAR(30) CHECK (
+        grounding IS NULL OR grounding IN (
+            'knowledge', 'knowledge_plus_general', 'general', 'insufficient'
+        )
+    ),
+    citations JSONB NOT NULL,
+    error_code VARCHAR(80),
+    created_at TIMESTAMPTZ NOT NULL,
+    completed_at TIMESTAMPTZ
+);
+
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions (user_id, expires_at DESC);
 CREATE INDEX IF NOT EXISTS idx_email_codes_email_created ON email_verification_codes (email, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sources_user ON sources (user_id, created_at DESC);
@@ -193,5 +242,17 @@ CREATE INDEX IF NOT EXISTS idx_knowledge_events_created_at
 
 CREATE INDEX IF NOT EXISTS idx_knowledge_events_user_created
     ON knowledge_events (user_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_memories_user_active
+    ON user_memories (user_id, status, kind);
+
+CREATE INDEX IF NOT EXISTS idx_memories_user_created
+    ON user_memories (user_id, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_chat_sessions_user_updated
+    ON chat_sessions (user_id, updated_at);
+
+CREATE INDEX IF NOT EXISTS idx_chat_messages_session_created
+    ON chat_messages (session_id, created_at);
 
 COMMIT;

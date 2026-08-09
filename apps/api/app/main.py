@@ -13,7 +13,7 @@ from fastapi import (
     Response, UploadFile, status,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from starlette.background import BackgroundTask
 
 from .ai import (
@@ -26,7 +26,14 @@ from .auth import (
     verification_code_hash,
 )
 from .mailer import send_registration_code
-from .memories import extract_memory_block, load_active_memories, plan_memory_block
+from .memories import (
+    chat_memory_block, extract_memory_block, load_active_memories, normalize_memory_content,
+    plan_memory_block,
+)
+from .chat import (
+    ChatStreamParser, build_chat_history, build_retrieval_query,
+    retrieve_chat_sources, should_infer_memory, sse_event, validated_citations,
+)
 from .logging_config import configure_logging
 from .image_ingestion import (
     ImageValidationError, TemporaryImage, cleanup_job_directory,
@@ -40,12 +47,13 @@ from .exports import (
 from .prompts import EXTRACT_PROMPT_VERSION, MERGE_PROMPT_VERSION, OCR_PROMPT_VERSION
 from .schemas import (
     ApplyChangeSet, ChangeSet, Document, DocumentUpdate, DocumentVersion,
+    ChatMessage, ChatMessageCreate, ChatSession, ChatSessionCreate, ChatSessionUpdate,
     IngestionCreate, KnowledgeEvent, Memory, MemoryCreate, MemoryUpdate,
     ReprocessSource, SourceProcessing,
     CodeLoginRequest, SendVerificationCodeRequest, User,
 )
 from .settings import settings
-from .store import DocumentVersionConflict, Store, now_utc
+from .store import ChatSessionBusy, DocumentVersionConflict, Store, now_utc
 
 
 configure_logging()
@@ -115,10 +123,11 @@ def _attachment_header(filename: str) -> str:
 def recover_interrupted_image_work() -> None:
     removed = cleanup_stale_directories()
     interrupted = store.fail_interrupted_image_sources()
-    if removed or interrupted:
+    interrupted_chats = store.fail_interrupted_chat_messages()
+    if removed or interrupted or interrupted_chats:
         logger.warning(
-            "image startup recovery removed_temp_dirs=%s interrupted_sources=%s",
-            removed, interrupted,
+            "startup recovery removed_temp_dirs=%s interrupted_sources=%s interrupted_chats=%s",
+            removed, interrupted, interrupted_chats,
         )
 
 
@@ -232,7 +241,7 @@ def _try_infer_and_store_memories(ai, store, user_id: str, instruction: str, sou
     """Infer user preferences from reprocess instruction and store as candidates.
 
     Non-fatal: if inference fails, logs and continues without raising.
-    Deduplicates against existing candidate memories by kind+content.
+    Deduplicates against all existing memories by normalized kind+content.
     """
     try:
         result = ai.infer_preferences(
@@ -240,35 +249,40 @@ def _try_infer_and_store_memories(ai, store, user_id: str, instruction: str, sou
             source_label=source_label,
         )
         if not result.memories:
-            return
+            return []
 
-        # Deduplicate: load existing candidates to avoid creating duplicates
-        existing_candidates = store.list_memories(user_id, status="candidate")
+        existing_memories = store.list_memories(user_id)
         existing_keys = {
-            (m["kind"], m["content"].strip().casefold())
-            for m in existing_candidates
+            (m["kind"], normalize_memory_content(m["content"]))
+            for m in existing_memories
         }
 
+        created = []
         for inferred in result.memories:
-            key = (inferred.kind, inferred.content.strip().casefold())
+            content = inferred.content.strip()
+            key = (inferred.kind, normalize_memory_content(content))
             if key in existing_keys:
-                continue  # Skip duplicate
-            store.create_memory(
+                continue
+            memory = store.create_memory(
                 user_id,
                 kind=inferred.kind,
-                content=inferred.content,
+                content=content,
                 scope="global",
                 scope_ref=None,
                 status="candidate",
                 confidence=inferred.confidence,
                 origin="ai_inferred",
             )
+            created.append(memory)
+            existing_keys.add(key)
             logger.info(
                 "memory_inferred user_id=%s kind=%s confidence=%.2f reason=%r",
                 user_id, inferred.kind, inferred.confidence, inferred.reason,
             )
+        return created
     except Exception as exc:
         logger.warning("memory_inference_failed user_id=%s error=%r", user_id, exc)
+        return []
 
 
 def run_knowledge_pipeline(user_id: str, source_id: str):
@@ -361,8 +375,6 @@ def run_knowledge_pipeline(user_id: str, source_id: str):
                 f"仍有 {len(missing_refs)} 个知识单元未进入变更草案",
                 retryable=True,
             )
-        # Increment use_count for all memories that were injected
-        store.increment_memory_usage(user_id, used_memory_ids)
         change_set = store.create_change_set_for_source(
             user_id, source_id, proposals, extraction=extraction,
             supersedes_change_set_id=source.get("pending_supersedes_change_set_id"),
@@ -370,6 +382,14 @@ def run_knowledge_pipeline(user_id: str, source_id: str):
             covered_inputs=covered if source["kind"] == "image" else 0,
             extraction_attempts=attempts,
         )
+
+        try:
+            store.increment_memory_usage(user_id, used_memory_ids)
+        except Exception as exc:
+            logger.warning(
+                "memory_usage_update_failed user_id=%s source_id=%s error=%r",
+                user_id, source_id, exc,
+            )
 
         # After a successful reprocess with an analysis_instruction, ask the AI to
         # infer stable user preferences and write them as candidate memories for review.
@@ -724,6 +744,204 @@ def list_knowledge_events(user: dict = Depends(current_user)):
     return store.list_events(user["id"])
 
 
+@app.post("/v1/chat/sessions", response_model=ChatSession, status_code=201)
+def create_chat_session(payload: ChatSessionCreate, user: dict = Depends(current_user)):
+    return store.create_chat_session(user["id"], payload.title)
+
+
+@app.get("/v1/chat/sessions", response_model=list[ChatSession])
+def list_chat_sessions(user: dict = Depends(current_user)):
+    return store.list_chat_sessions(user["id"])
+
+
+@app.patch("/v1/chat/sessions/{session_id}", response_model=ChatSession)
+def update_chat_session(
+    session_id: str, payload: ChatSessionUpdate, user: dict = Depends(current_user),
+):
+    result = store.update_chat_session(user["id"], session_id, payload.title)
+    if not result:
+        raise HTTPException(404, "Chat session not found")
+    return result
+
+
+@app.delete("/v1/chat/sessions/{session_id}", status_code=204)
+def delete_chat_session(session_id: str, response: Response, user: dict = Depends(current_user)):
+    result = store.delete_chat_session(user["id"], session_id)
+    if result == "not_found":
+        raise HTTPException(404, "Chat session not found")
+    if result == "busy":
+        raise HTTPException(status.HTTP_409_CONFLICT, detail={
+            "message": "当前对话仍在生成回复", "code": "CHAT_SESSION_BUSY",
+        })
+    response.status_code = status.HTTP_204_NO_CONTENT
+    return None
+
+
+@app.get("/v1/chat/sessions/{session_id}/messages", response_model=list[ChatMessage])
+def list_chat_messages(session_id: str, user: dict = Depends(current_user)):
+    result = store.list_chat_messages(user["id"], session_id)
+    if result is None:
+        raise HTTPException(404, "Chat session not found")
+    return result
+
+
+def _chat_stream(user_id: str, user_message: dict, assistant_message: dict):
+    completed = False
+    started = time.perf_counter()
+    first_delta_logged = False
+    try:
+        logger.info(
+            "chat_generation_started user_id=%s session_id=%s assistant_message_id=%s model=%s",
+            user_id, assistant_message["session_id"], assistant_message["id"], ai.model,
+        )
+        yield sse_event("start", {
+            "session_id": assistant_message["session_id"],
+            "user_message_id": user_message["id"],
+            "assistant_message_id": assistant_message["id"],
+        })
+        messages = store.list_chat_messages(user_id, assistant_message["session_id"])
+        if messages is None:
+            raise RuntimeError("Chat session disappeared")
+        query = build_retrieval_query(messages)
+        sources = retrieve_chat_sources(query, store.list_documents(user_id), limit=5)
+        history = build_chat_history(messages)
+        active_memories = load_active_memories(store, user_id)
+        chat_memories = [item for item in active_memories if item["kind"] in {"domain", "style"}]
+        memory_block = chat_memory_block(chat_memories)
+        logger.info(
+            "chat_context_prepared user_id=%s session_id=%s history_messages=%s sources=%s memories=%s",
+            user_id, assistant_message["session_id"], len(history), len(sources), len(chat_memories),
+        )
+        parser = ChatStreamParser(bool(sources))
+        for chunk in ai.stream_chat(history, sources, memory_block=memory_block):
+            for delta in parser.feed(chunk):
+                if delta and not first_delta_logged:
+                    first_delta_logged = True
+                    logger.info(
+                        "chat_first_delta user_id=%s session_id=%s assistant_message_id=%s elapsed_ms=%s",
+                        user_id, assistant_message["session_id"], assistant_message["id"],
+                        int((time.perf_counter() - started) * 1000),
+                    )
+                yield sse_event("delta", {"text": delta})
+        for delta in parser.finish():
+            if delta and not first_delta_logged:
+                first_delta_logged = True
+                logger.info(
+                    "chat_first_delta user_id=%s session_id=%s assistant_message_id=%s elapsed_ms=%s",
+                    user_id, assistant_message["session_id"], assistant_message["id"],
+                    int((time.perf_counter() - started) * 1000),
+                )
+            yield sse_event("delta", {"text": delta})
+        answer = parser.answer
+        if not answer:
+            raise AIProviderError("AI_INVALID_RESPONSE", "模型没有返回可用内容", retryable=True)
+        citations = validated_citations(answer, sources)
+        grounding = parser.grounding or ("knowledge" if citations else "general")
+        if grounding in {"knowledge", "knowledge_plus_general"} and not citations:
+            grounding = "general"
+        saved = store.complete_chat_message(
+            user_id, assistant_message["id"], content=answer,
+            grounding=grounding, citations=citations,
+        )
+        if not saved:
+            raise RuntimeError("Chat message is no longer generating")
+        completed = True
+        try:
+            store.increment_memory_usage(user_id, [item["id"] for item in chat_memories])
+        except Exception as exc:
+            logger.warning(
+                "chat_memory_usage_update_failed user_id=%s message_id=%s error=%r",
+                user_id, assistant_message["id"], exc,
+            )
+        candidates = []
+        if should_infer_memory(user_message["content"]):
+            candidates = _try_infer_and_store_memories(
+                ai, store, user_id, user_message["content"], "knowledge_chat",
+            )
+        if candidates:
+            yield sse_event("memory_candidates", {"memories": candidates})
+        logger.info(
+            "chat_generation_completed user_id=%s session_id=%s assistant_message_id=%s "
+            "grounding=%s citations=%s candidates=%s answer_chars=%s elapsed_ms=%s",
+            user_id, assistant_message["session_id"], assistant_message["id"], grounding,
+            len(citations), len(candidates), len(answer),
+            int((time.perf_counter() - started) * 1000),
+        )
+        yield sse_event("done", {"message": saved})
+    except GeneratorExit:
+        if not completed:
+            store.fail_chat_message(
+                user_id, assistant_message["id"], "CHAT_CANCELLED", cancelled=True,
+            )
+            completed = True
+            logger.info(
+                "chat_generation_cancelled user_id=%s session_id=%s assistant_message_id=%s elapsed_ms=%s",
+                user_id, assistant_message["session_id"], assistant_message["id"],
+                int((time.perf_counter() - started) * 1000),
+            )
+        raise
+    except AIProviderError as exc:
+        store.fail_chat_message(user_id, assistant_message["id"], exc.code)
+        completed = True
+        logger.warning(
+            "chat_generation_failed user_id=%s session_id=%s assistant_message_id=%s "
+            "error_code=%s retryable=%s upstream_status=%s elapsed_ms=%s",
+            user_id, assistant_message["session_id"], assistant_message["id"], exc.code,
+            exc.retryable, exc.upstream_status, int((time.perf_counter() - started) * 1000),
+        )
+        yield sse_event("error", {
+            "code": exc.code, "message": str(exc), "retryable": exc.retryable,
+        })
+    except Exception as exc:
+        logger.exception("chat generation failed message_id=%s", assistant_message["id"])
+        store.fail_chat_message(user_id, assistant_message["id"], "CHAT_INTERNAL_ERROR")
+        completed = True
+        yield sse_event("error", {
+            "code": "CHAT_INTERNAL_ERROR", "message": "对话生成失败", "retryable": True,
+        })
+    finally:
+        if not completed:
+            store.fail_chat_message(
+                user_id, assistant_message["id"], "CHAT_CANCELLED", cancelled=True,
+            )
+
+
+def _chat_streaming_response(user_id: str, user_message: dict, assistant_message: dict):
+    return StreamingResponse(
+        _chat_stream(user_id, user_message, assistant_message),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.post("/v1/chat/sessions/{session_id}/messages")
+def create_chat_message(
+    session_id: str, payload: ChatMessageCreate, user: dict = Depends(current_user),
+):
+    try:
+        turn = store.create_chat_turn(user["id"], session_id, payload.content, ai.model)
+    except ChatSessionBusy:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail={
+            "message": "当前对话仍在生成回复", "code": "CHAT_ALREADY_GENERATING",
+        })
+    if not turn:
+        raise HTTPException(404, "Chat session not found")
+    return _chat_streaming_response(user["id"], *turn)
+
+
+@app.post("/v1/chat/messages/{message_id}/retry")
+def retry_chat_message(message_id: str, user: dict = Depends(current_user)):
+    try:
+        turn = store.retry_chat_message(user["id"], message_id)
+    except ChatSessionBusy:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail={
+            "message": "当前对话仍在生成回复", "code": "CHAT_ALREADY_GENERATING",
+        })
+    if not turn:
+        raise HTTPException(404, "Retryable chat message not found")
+    return _chat_streaming_response(user["id"], *turn)
+
+
 @app.get("/v1/memories", response_model=list[Memory])
 def list_memories(
     status: Literal["active", "candidate", "suppressed"] | None = None,
@@ -734,15 +952,23 @@ def list_memories(
 
 @app.post("/v1/memories", response_model=Memory, status_code=201)
 def create_memory(payload: MemoryCreate, user: dict = Depends(current_user)):
+    key = (payload.kind, normalize_memory_content(payload.content))
+    if any(
+        (item["kind"], normalize_memory_content(item["content"])) == key
+        for item in store.list_memories(user["id"])
+    ):
+        raise HTTPException(status.HTTP_409_CONFLICT, detail={
+            "message": "相同偏好已经存在", "code": "MEMORY_DUPLICATE",
+        })
     return store.create_memory(
         user["id"],
         kind=payload.kind,
         content=payload.content,
-        scope=payload.scope,
-        scope_ref=payload.scope_ref,
-        status=payload.status,
-        confidence=payload.confidence,
-        origin=payload.origin,
+        scope="global",
+        scope_ref=None,
+        status="active",
+        confidence=1.0,
+        origin="user_explicit",
     )
 
 
@@ -756,11 +982,27 @@ def get_memory(memory_id: str, user: dict = Depends(current_user)):
 
 @app.patch("/v1/memories/{memory_id}", response_model=Memory)
 def update_memory(memory_id: str, payload: MemoryUpdate, user: dict = Depends(current_user)):
+    current = store.get_memory(user["id"], memory_id)
+    if not current:
+        raise HTTPException(404, "Memory not found")
+    if payload.status == "candidate" and current["status"] != "candidate":
+        raise HTTPException(status.HTTP_409_CONFLICT, detail={
+            "message": "记忆状态不能回退为待确认", "code": "MEMORY_STATUS_TRANSITION_INVALID",
+        })
+    if payload.content is not None:
+        key = (current["kind"], normalize_memory_content(payload.content))
+        if any(
+            item["id"] != memory_id
+            and (item["kind"], normalize_memory_content(item["content"])) == key
+            for item in store.list_memories(user["id"])
+        ):
+            raise HTTPException(status.HTTP_409_CONFLICT, detail={
+                "message": "相同偏好已经存在", "code": "MEMORY_DUPLICATE",
+            })
     result = store.update_memory(
         user["id"], memory_id,
         content=payload.content,
         status=payload.status,
-        confidence=payload.confidence,
     )
     if not result:
         raise HTTPException(404, "Memory not found")

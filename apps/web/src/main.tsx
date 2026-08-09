@@ -8,6 +8,7 @@ import { AppShell } from './app/AppShell';
 import { CaptureView } from './features/capture/CaptureView';
 import { LibraryView, GrowthView } from './features/documents/knowledgeViews';
 import { MemoriesPage } from './features/memories/MemoriesPage';
+import { ChatPage } from './features/chat/ChatPage';
 import { PrintExportPage } from './features/documents/exportViews';
 import './styles.css';
 
@@ -70,6 +71,8 @@ function KnowledgeApp({ user, onSignedOut }: { user: User; onSignedOut: () => vo
 
   const view = location.pathname.startsWith('/library')
     ? 'library'
+    : location.pathname.startsWith('/chat')
+    ? 'chat'
     : location.pathname.startsWith('/growth')
     ? 'growth'
     : location.pathname.startsWith('/memories')
@@ -80,6 +83,8 @@ function KnowledgeApp({ user, onSignedOut }: { user: User; onSignedOut: () => vo
     view === 'library' ? decodeURIComponent(location.pathname.split('/')[2] || '') || null : null;
   const selectedEventId =
     view === 'growth' ? decodeURIComponent(location.pathname.split('/')[2] || '') || null : null;
+  const selectedChatSessionId =
+    view === 'chat' ? decodeURIComponent(location.pathname.split('/')[2] || '') || null : null;
 
   useEffect(() => {
     Promise.all([api.documents(), api.events()])
@@ -129,6 +134,16 @@ function KnowledgeApp({ user, onSignedOut }: { user: User; onSignedOut: () => vo
         <CaptureView onRefresh={handleRefresh} onAuthError={handleAuthError} />
       )}
 
+      {view === 'chat' && (
+        <ChatPage
+          sessionId={selectedChatSessionId}
+          onOpenSession={(id) => navigate(id ? `/chat/${encodeURIComponent(id)}` : '/chat')}
+          onOpenDocument={(id) => navigate(`/library/${encodeURIComponent(id)}`)}
+          onOpenCapture={() => navigate('/')}
+          onAuthError={handleAuthError}
+        />
+      )}
+
       {view === 'library' && (
         <LibraryView
           documents={documents}
@@ -152,7 +167,7 @@ function KnowledgeApp({ user, onSignedOut }: { user: User; onSignedOut: () => vo
         />
       )}
 
-      {view === 'memories' && <MemoriesPage />}
+      {view === 'memories' && <MemoriesPage onAuthError={handleAuthError} />}
     </AppShell>
   );
 }

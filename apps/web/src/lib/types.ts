@@ -63,17 +63,11 @@ export type Memory = {
 export type MemoryCreate = {
   kind: MemoryKind;
   content: string;
-  scope?: MemoryScope;
-  scope_ref?: string | null;
-  status?: MemoryStatus;
-  confidence?: number;
-  origin?: MemoryOrigin;
 };
 
 export type MemoryUpdate = {
   content?: string;
   status?: MemoryStatus;
-  confidence?: number;
 };
 
 export type SourceProcessing = {
@@ -92,4 +86,50 @@ export type SourceProcessing = {
     retryable: boolean;
     requires_reupload: boolean;
   } | null;
+};
+
+export type ChatGrounding = 'knowledge' | 'knowledge_plus_general' | 'general' | 'insufficient';
+export type ChatMessageStatus = 'generating' | 'completed' | 'failed' | 'cancelled';
+
+export type ChatSession = {
+  id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ChatCitation = {
+  ref: string;
+  document_id: string;
+  title: string;
+  excerpt: string;
+};
+
+export type ChatMessage = {
+  id: string;
+  session_id: string;
+  role: 'user' | 'assistant';
+  status: ChatMessageStatus;
+  content: string;
+  model: string | null;
+  grounding: ChatGrounding | null;
+  citations: ChatCitation[];
+  error_code: string | null;
+  created_at: string;
+  completed_at: string | null;
+  memory_candidates?: Memory[];
+};
+
+export type ChatStreamHandlers = {
+  onStart: (payload: { session_id: string; user_message_id: string; assistant_message_id: string }) => void;
+  onDelta: (text: string) => void;
+  onMemoryCandidates: (memories: Memory[]) => void;
+  onDone: (message: ChatMessage) => void;
+  onError: (error: ApiStreamError) => void;
+};
+
+export type ApiStreamError = {
+  code: string;
+  message: string;
+  retryable: boolean;
 };

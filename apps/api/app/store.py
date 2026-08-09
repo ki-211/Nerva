@@ -1,6 +1,6 @@
 import hmac
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import (
     JSON, Boolean, CheckConstraint, Column, DateTime, Float, ForeignKey, Index,
@@ -199,9 +199,9 @@ user_memories = Table(
     Column("user_id", String(40), ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
     Column("kind", String(30), nullable=False),
     Column("content", Text, nullable=False),
-    Column("scope", String(30), nullable=False, server_default="global"),
+    Column("scope", String(30), nullable=False),
     Column("scope_ref", String(160)),
-    Column("status", String(20), nullable=False, server_default="candidate"),
+    Column("status", String(20), nullable=False),
     Column("confidence", Float, nullable=False, server_default="1.0"),
     Column("origin", String(20), nullable=False),
     Column("use_count", Integer, nullable=False, server_default="0"),
@@ -220,6 +220,40 @@ user_memories = Table(
     ),
     CheckConstraint("confidence BETWEEN 0 AND 1", name="ck_memories_confidence"),
     CheckConstraint("use_count >= 0", name="ck_memories_use_count"),
+)
+
+chat_sessions = Table(
+    "chat_sessions", metadata,
+    Column("id", String(40), primary_key=True),
+    Column("user_id", String(40), ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+    Column("title", String(80), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+)
+
+chat_messages = Table(
+    "chat_messages", metadata,
+    Column("id", String(40), primary_key=True),
+    Column("user_id", String(40), ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+    Column("session_id", String(40), ForeignKey("chat_sessions.id", ondelete="CASCADE"), nullable=False),
+    Column("role", String(20), nullable=False),
+    Column("status", String(20), nullable=False),
+    Column("content", Text, nullable=False),
+    Column("model", String(160)),
+    Column("grounding", String(30)),
+    Column("citations", JSON().with_variant(JSONB, "postgresql"), nullable=False),
+    Column("error_code", String(80)),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("completed_at", DateTime(timezone=True)),
+    CheckConstraint("role IN ('user', 'assistant')", name="ck_chat_messages_role"),
+    CheckConstraint(
+        "status IN ('generating', 'completed', 'failed', 'cancelled')",
+        name="ck_chat_messages_status",
+    ),
+    CheckConstraint(
+        "grounding IS NULL OR grounding IN ('knowledge', 'knowledge_plus_general', 'general', 'insufficient')",
+        name="ck_chat_messages_grounding",
+    ),
 )
 
 knowledge_events = Table(
@@ -255,7 +289,9 @@ Index("idx_change_items_target_document", change_items.c.target_document_id)
 Index("idx_knowledge_events_created_at", knowledge_events.c.created_at.desc())
 Index("idx_knowledge_events_user_created", knowledge_events.c.user_id, knowledge_events.c.created_at.desc())
 Index("idx_memories_user_active", user_memories.c.user_id, user_memories.c.status, user_memories.c.kind)
-Index("idx_memories_user_created", user_memories.c.user_id, user_memories.c.created_at.desc())
+Index("idx_memories_user_created", user_memories.c.user_id, user_memories.c.created_at)
+Index("idx_chat_sessions_user_updated", chat_sessions.c.user_id, chat_sessions.c.updated_at)
+Index("idx_chat_messages_session_created", chat_messages.c.session_id, chat_messages.c.created_at)
 
 
 class Store:
@@ -1052,11 +1088,15 @@ class Store:
             ).order_by(knowledge_events.c.created_at.desc())).mappings()
             return [dict(row) for row in rows]
 
-    def list_memories(self, user_id: str, *, status: str | None = None) -> list[dict]:
+    def list_memories(
+        self, user_id: str, *, status: str | None = None, scope: str | None = None,
+    ) -> list[dict]:
         with self.engine.connect() as db:
             query = select(user_memories).where(user_memories.c.user_id == user_id)
             if status:
                 query = query.where(user_memories.c.status == status)
+            if scope:
+                query = query.where(user_memories.c.scope == scope)
             rows = db.execute(query.order_by(user_memories.c.created_at.desc())).mappings()
             return [dict(row) for row in rows]
 
@@ -1087,7 +1127,7 @@ class Store:
 
     def update_memory(
         self, user_id: str, memory_id: str, *, content: str | None = None,
-        status: str | None = None, confidence: float | None = None,
+        status: str | None = None,
     ) -> dict | None:
         updated_at = now_utc()
         updates = {"updated_at": updated_at}
@@ -1095,8 +1135,6 @@ class Store:
             updates["content"] = content
         if status is not None:
             updates["status"] = status
-        if confidence is not None:
-            updates["confidence"] = confidence
         with self.engine.begin() as db:
             result = db.execute(update(user_memories).where(
                 user_memories.c.id == memory_id,
@@ -1127,8 +1165,212 @@ class Store:
                 last_used_at=used_at,
             ))
 
+    def create_chat_session(self, user_id: str, title: str = "新对话") -> dict:
+        session_id = new_id("cht")
+        created_at = now_utc()
+        with self.engine.begin() as db:
+            db.execute(insert(chat_sessions).values(
+                id=session_id, user_id=user_id, title=title,
+                created_at=created_at, updated_at=created_at,
+            ))
+        result = self.get_chat_session(user_id, session_id)
+        assert result is not None
+        return result
+
+    def list_chat_sessions(self, user_id: str) -> list[dict]:
+        with self.engine.connect() as db:
+            rows = db.execute(select(chat_sessions).where(
+                chat_sessions.c.user_id == user_id,
+            ).order_by(chat_sessions.c.updated_at.desc()).limit(100)).mappings()
+            return [dict(row) for row in rows]
+
+    def get_chat_session(self, user_id: str, session_id: str) -> dict | None:
+        with self.engine.connect() as db:
+            row = db.execute(select(chat_sessions).where(
+                chat_sessions.c.id == session_id,
+                chat_sessions.c.user_id == user_id,
+            )).mappings().first()
+            return dict(row) if row else None
+
+    def update_chat_session(self, user_id: str, session_id: str, title: str) -> dict | None:
+        with self.engine.begin() as db:
+            result = db.execute(update(chat_sessions).where(
+                chat_sessions.c.id == session_id,
+                chat_sessions.c.user_id == user_id,
+            ).values(title=title, updated_at=now_utc()))
+            if result.rowcount != 1:
+                return None
+        return self.get_chat_session(user_id, session_id)
+
+    def delete_chat_session(self, user_id: str, session_id: str) -> str:
+        with self.engine.begin() as db:
+            owned = db.execute(select(chat_sessions.c.id).where(
+                chat_sessions.c.id == session_id,
+                chat_sessions.c.user_id == user_id,
+            )).first()
+            if not owned:
+                return "not_found"
+            busy = db.execute(select(chat_messages.c.id).where(
+                chat_messages.c.session_id == session_id,
+                chat_messages.c.user_id == user_id,
+                chat_messages.c.status == "generating",
+            ).limit(1)).first()
+            if busy:
+                return "busy"
+            db.execute(delete(chat_sessions).where(chat_sessions.c.id == session_id))
+            return "deleted"
+
+    def list_chat_messages(self, user_id: str, session_id: str, limit: int = 200) -> list[dict] | None:
+        with self.engine.connect() as db:
+            owned = db.execute(select(chat_sessions.c.id).where(
+                chat_sessions.c.id == session_id,
+                chat_sessions.c.user_id == user_id,
+            )).first()
+            if not owned:
+                return None
+            rows = list(db.execute(select(chat_messages).where(
+                chat_messages.c.session_id == session_id,
+                chat_messages.c.user_id == user_id,
+            ).order_by(chat_messages.c.created_at.desc(), chat_messages.c.id.desc()).limit(limit)).mappings())
+            return [dict(row) for row in reversed(rows)]
+
+    def get_chat_message(self, user_id: str, message_id: str) -> dict | None:
+        with self.engine.connect() as db:
+            row = db.execute(select(chat_messages).where(
+                chat_messages.c.id == message_id,
+                chat_messages.c.user_id == user_id,
+            )).mappings().first()
+            return dict(row) if row else None
+
+    def create_chat_turn(self, user_id: str, session_id: str, content: str, model: str) -> tuple[dict, dict] | None:
+        user_message_id = new_id("msg")
+        assistant_message_id = new_id("msg")
+        user_created_at = now_utc()
+        assistant_created_at = user_created_at + timedelta(microseconds=1)
+        with self.engine.begin() as db:
+            session = db.execute(select(chat_sessions).where(
+                chat_sessions.c.id == session_id,
+                chat_sessions.c.user_id == user_id,
+            ).with_for_update()).mappings().first()
+            if not session:
+                return None
+            if db.execute(select(chat_messages.c.id).where(
+                chat_messages.c.session_id == session_id,
+                chat_messages.c.user_id == user_id,
+                chat_messages.c.status == "generating",
+            ).limit(1)).first():
+                raise ChatSessionBusy()
+            has_user_message = db.execute(select(chat_messages.c.id).where(
+                chat_messages.c.session_id == session_id,
+                chat_messages.c.role == "user",
+            ).limit(1)).first()
+            db.execute(insert(chat_messages), [
+                {
+                    "id": user_message_id, "user_id": user_id, "session_id": session_id,
+                    "role": "user", "status": "completed", "content": content,
+                    "model": None, "grounding": None, "citations": [], "error_code": None,
+                    "created_at": user_created_at, "completed_at": user_created_at,
+                },
+                {
+                    "id": assistant_message_id, "user_id": user_id, "session_id": session_id,
+                    "role": "assistant", "status": "generating", "content": "",
+                    "model": model, "grounding": None, "citations": [], "error_code": None,
+                    "created_at": assistant_created_at, "completed_at": None,
+                },
+            ])
+            updates = {"updated_at": assistant_created_at}
+            if not has_user_message and session["title"] == "新对话":
+                normalized = " ".join(content.split())
+                updates["title"] = normalized[:30] + ("…" if len(normalized) > 30 else "")
+            db.execute(update(chat_sessions).where(chat_sessions.c.id == session_id).values(**updates))
+        user_message = self.get_chat_message(user_id, user_message_id)
+        assistant_message = self.get_chat_message(user_id, assistant_message_id)
+        assert user_message is not None and assistant_message is not None
+        return user_message, assistant_message
+
+    def complete_chat_message(
+        self, user_id: str, message_id: str, *, content: str,
+        grounding: str, citations: list[dict],
+    ) -> dict | None:
+        completed_at = now_utc()
+        with self.engine.begin() as db:
+            row = db.execute(select(chat_messages.c.session_id).where(
+                chat_messages.c.id == message_id,
+                chat_messages.c.user_id == user_id,
+                chat_messages.c.role == "assistant",
+                chat_messages.c.status == "generating",
+            )).first()
+            if not row:
+                return None
+            db.execute(update(chat_messages).where(chat_messages.c.id == message_id).values(
+                status="completed", content=content, grounding=grounding,
+                citations=citations, error_code=None, completed_at=completed_at,
+            ))
+            db.execute(update(chat_sessions).where(chat_sessions.c.id == row.session_id).values(
+                updated_at=completed_at,
+            ))
+        return self.get_chat_message(user_id, message_id)
+
+    def fail_chat_message(self, user_id: str, message_id: str, error_code: str, *, cancelled: bool = False) -> dict | None:
+        with self.engine.begin() as db:
+            result = db.execute(update(chat_messages).where(
+                chat_messages.c.id == message_id,
+                chat_messages.c.user_id == user_id,
+                chat_messages.c.role == "assistant",
+                chat_messages.c.status == "generating",
+            ).values(
+                status="cancelled" if cancelled else "failed",
+                error_code=error_code, completed_at=now_utc(),
+            ))
+            if result.rowcount != 1:
+                return None
+        return self.get_chat_message(user_id, message_id)
+
+    def retry_chat_message(self, user_id: str, message_id: str) -> tuple[dict, dict] | None:
+        with self.engine.begin() as db:
+            assistant = db.execute(select(chat_messages).where(
+                chat_messages.c.id == message_id,
+                chat_messages.c.user_id == user_id,
+                chat_messages.c.role == "assistant",
+                chat_messages.c.status.in_(("failed", "cancelled")),
+            ).with_for_update()).mappings().first()
+            if not assistant:
+                return None
+            if db.execute(select(chat_messages.c.id).where(
+                chat_messages.c.session_id == assistant["session_id"],
+                chat_messages.c.status == "generating",
+            ).limit(1)).first():
+                raise ChatSessionBusy()
+            user_message = db.execute(select(chat_messages).where(
+                chat_messages.c.session_id == assistant["session_id"],
+                chat_messages.c.user_id == user_id,
+                chat_messages.c.role == "user",
+                chat_messages.c.created_at <= assistant["created_at"],
+            ).order_by(chat_messages.c.created_at.desc(), chat_messages.c.id.desc()).limit(1)).mappings().first()
+            if not user_message:
+                return None
+            db.execute(update(chat_messages).where(chat_messages.c.id == message_id).values(
+                status="generating", content="", grounding=None, citations=[],
+                error_code=None, completed_at=None,
+            ))
+        retried = self.get_chat_message(user_id, message_id)
+        assert retried is not None
+        return dict(user_message), retried
+
+    def fail_interrupted_chat_messages(self) -> int:
+        with self.engine.begin() as db:
+            result = db.execute(update(chat_messages).where(
+                chat_messages.c.role == "assistant",
+                chat_messages.c.status == "generating",
+            ).values(status="failed", error_code="CHAT_INTERRUPTED", completed_at=now_utc()))
+            return result.rowcount
+
 
 class DocumentVersionConflict(RuntimeError):
     def __init__(self, current_version: int):
         super().__init__("Document version is stale")
         self.current_version = current_version
+
+
+class ChatSessionBusy(RuntimeError):
+    pass
