@@ -355,25 +355,27 @@ export function ChatPage({ sessionId, onOpenSession, onOpenDocument, onOpenCaptu
         {error && <div className="chat-error" role="alert">{error}</div>}
         <div className="chat-composer">
           <label className="chat-public-toggle"><input type="checkbox" checked={includePublic} onChange={(event) => setIncludePublic(event.target.checked)} disabled={streaming} /> 包含大众知识库</label>
-          <textarea
-            value={input}
-            onChange={(event) => setInput(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter' && !event.shiftKey) {
-                event.preventDefault();
-                send();
-              }
-            }}
-            maxLength={4000}
-            disabled={loading && sessionId !== null}
-            placeholder="询问知识库，或说“请记住：以后……”"
-          />
-          {streaming ? (
-            <button className="stop" onClick={() => abortRef.current?.abort()}>停止</button>
-          ) : (
-            <button onClick={send} disabled={!input.trim()}>发送</button>
-          )}
-          <small>{input.length}/4000 · Enter 发送，Shift + Enter 换行</small>
+          <div className="chat-input-shell">
+            <textarea
+              value={input}
+              onChange={(event) => setInput(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' && !event.shiftKey) {
+                  event.preventDefault();
+                  send();
+                }
+              }}
+              maxLength={4000}
+              disabled={loading && sessionId !== null}
+              placeholder="询问知识库，或说“请记住：以后……”"
+            />
+            {streaming ? (
+              <button className="stop" onClick={() => abortRef.current?.abort()}>停止</button>
+            ) : (
+              <button onClick={send} disabled={!input.trim()}>发送</button>
+            )}
+            <small>{input.length}/4000 · Enter 发送，Shift + Enter 换行</small>
+          </div>
         </div>
       </section>
     </div>

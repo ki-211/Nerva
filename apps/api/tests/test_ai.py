@@ -77,6 +77,55 @@ class BailianAITest(unittest.TestCase):
         self.assertEqual(requests[1][0], "/v1/reranks")
         self.assertEqual(requests[1][1]["documents"], ["candidate"])
 
+    def test_research_modes_and_web_sources(self):
+        captured = []
+
+        def handler(request):
+            captured.append(json.loads(request.content))
+            mode = captured[-1]["tool_choice"]
+            source_event = ""
+            if mode == "required":
+                source_event = (
+                    'data: {"type":"response.output_item.done","item":{"type":"web_search_call",'
+                    '"action":{"sources":[{"type":"url","url":"https://Example.com/a#section"}]}}}\n\n'
+                )
+            content = (
+                'data: {"type":"response.output_text.delta","delta":"# 研究结果"}\n\n'
+                + source_event
+                + 'data: {"type":"response.completed","response":{"usage":{"x_tools":'
+                  '{"web_search":{"count":' + ('1' if mode == "required" else '0') + '}}}}}\n\n'
+            )
+            return httpx.Response(200, request=request, text=content)
+
+        ai = self.make_ai(handler)
+        web_events = list(ai.stream_research([{"role": "user", "content": "query"}], "web"))
+        self.assertEqual(captured[0]["tools"], [{"type": "web_search"}])
+        self.assertEqual(captured[0]["tool_choice"], "required")
+        self.assertEqual(web_events[-1]["basis"], "web")
+        self.assertEqual(web_events[-1]["sources"][0]["url"], "https://example.com/a")
+
+        ai_events = list(ai.stream_research([{"role": "user", "content": "query"}], "ai"))
+        self.assertEqual(captured[1]["tools"], [])
+        self.assertEqual(captured[1]["tool_choice"], "none")
+        self.assertEqual(ai_events[-1]["basis"], "ai")
+
+        smart_events = list(ai.stream_research([{"role": "user", "content": "query"}], "smart"))
+        self.assertEqual(captured[2]["tools"], [{"type": "web_search"}])
+        self.assertEqual(captured[2]["tool_choice"], "auto")
+        self.assertEqual(smart_events[-1]["basis"], "ai")
+
+    def test_web_research_requires_valid_source(self):
+        def handler(request):
+            return httpx.Response(200, request=request, text=(
+                'data: {"type":"response.output_text.delta","delta":"answer"}\n\n'
+                'data: {"type":"response.completed","response":{"usage":{}}}\n\n'
+            ))
+
+        ai = self.make_ai(handler)
+        with self.assertRaises(AIProviderError) as caught:
+            list(ai.stream_research([{"role": "user", "content": "query"}], "web"))
+        self.assertEqual(caught.exception.code, "RESEARCH_WEB_SOURCE_REQUIRED")
+
     def test_multiple_units_and_changes(self):
         responses = iter([
             chat_response({"units": [

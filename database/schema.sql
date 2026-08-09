@@ -214,6 +214,35 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     completed_at TIMESTAMPTZ
 );
 
+CREATE TABLE IF NOT EXISTS research_sessions (
+    id VARCHAR(40) PRIMARY KEY,
+    user_id VARCHAR(40) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    title VARCHAR(80) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS research_messages (
+    id VARCHAR(40) PRIMARY KEY,
+    user_id VARCHAR(40) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    session_id VARCHAR(40) NOT NULL REFERENCES research_sessions(id) ON DELETE CASCADE,
+    role VARCHAR(20) NOT NULL CHECK (role IN ('user', 'assistant')),
+    status VARCHAR(20) NOT NULL CHECK (
+        status IN ('generating', 'completed', 'failed', 'cancelled')
+    ),
+    content TEXT NOT NULL,
+    requested_mode VARCHAR(20) CHECK (
+        requested_mode IS NULL OR requested_mode IN ('smart', 'web', 'ai')
+    ),
+    basis VARCHAR(20) CHECK (basis IS NULL OR basis IN ('web', 'ai')),
+    model VARCHAR(160),
+    citations JSONB NOT NULL,
+    error_code VARCHAR(80),
+    ingestion_source_id VARCHAR(40) UNIQUE REFERENCES sources(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL,
+    completed_at TIMESTAMPTZ
+);
+
 CREATE TABLE IF NOT EXISTS document_chunks (
     id VARCHAR(40) PRIMARY KEY,
     user_id VARCHAR(40) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -278,6 +307,10 @@ CREATE INDEX IF NOT EXISTS idx_chat_sessions_user_updated
 
 CREATE INDEX IF NOT EXISTS idx_chat_messages_session_created
     ON chat_messages (session_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_research_sessions_user_updated
+    ON research_sessions (user_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_research_messages_session_created
+    ON research_messages (session_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_document_chunks_user
     ON document_chunks (user_id, document_id);
 CREATE INDEX IF NOT EXISTS idx_document_chunks_document_version

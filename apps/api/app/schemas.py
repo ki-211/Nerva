@@ -231,6 +231,8 @@ class MemoryInferenceResult(BaseModel):
 
 ChatGrounding = Literal["knowledge", "knowledge_plus_general", "general", "insufficient"]
 ChatMessageStatus = Literal["generating", "completed", "failed", "cancelled"]
+ResearchMode = Literal["smart", "web", "ai"]
+ResearchBasis = Literal["web", "ai"]
 
 
 class ChatSession(BaseModel):
@@ -304,6 +306,73 @@ class ChatMessage(BaseModel):
     created_at: datetime
     completed_at: datetime | None
     include_public: bool = True
+
+
+class ResearchSession(BaseModel):
+    id: str
+    title: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class ResearchSessionCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    title: str = Field(default="新研究", min_length=1, max_length=80)
+
+    @field_validator("title")
+    @classmethod
+    def normalize_title(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Research title cannot be blank")
+        return value
+
+
+class ResearchSessionUpdate(ResearchSessionCreate):
+    title: str = Field(min_length=1, max_length=80)
+
+
+class ResearchMessageCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    content: str = Field(min_length=1, max_length=4000)
+    mode: ResearchMode = "smart"
+
+    @field_validator("content")
+    @classmethod
+    def normalize_content(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Research message cannot be blank")
+        return value
+
+
+class ResearchRetry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    mode: ResearchMode | None = None
+
+
+class ResearchCitation(BaseModel):
+    ordinal: int = Field(ge=1)
+    title: str
+    url: str
+    domain: str
+    accessed_at: datetime
+
+
+class ResearchMessage(BaseModel):
+    id: str
+    session_id: str
+    role: Literal["user", "assistant"]
+    status: ChatMessageStatus
+    content: str
+    requested_mode: ResearchMode | None
+    basis: ResearchBasis | None
+    model: str | None
+    citations: list[ResearchCitation]
+    error_code: str | None
+    ingestion_source_id: str | None
+    created_at: datetime
+    completed_at: datetime | None
 
 
 class SearchItem(BaseModel):

@@ -63,9 +63,13 @@ from .schemas import (
     ReindexResponse, ReprocessSource, SearchResponse, SourceProcessing,
     CodeLoginRequest, SendVerificationCodeRequest, User,
     AdminLoginRequest, AdminUser, KnowledgeOwnership, PublicDocumentCreate,
+    ResearchMessage, ResearchMessageCreate, ResearchRetry,
+    ResearchSession, ResearchSessionCreate, ResearchSessionUpdate,
 )
 from .settings import settings
-from .store import ChatSessionBusy, DocumentVersionConflict, Store, now_utc
+from .store import (
+    ChatSessionBusy, DocumentVersionConflict, ResearchSessionBusy, Store, now_utc,
+)
 
 
 configure_logging()
@@ -86,6 +90,7 @@ ai = get_ai_adapter()
 ocr = get_ocr_adapter()
 index_executor: ThreadPoolExecutor | None = None
 index_executor_lock = Lock()
+EXPECTED_DATABASE_REVISION = "0013"
 
 
 def _get_index_executor() -> ThreadPoolExecutor:
@@ -278,6 +283,23 @@ def _attachment_header(filename: str) -> str:
 @app.on_event("startup")
 def recover_interrupted_image_work() -> None:
     settings.validate()
+    if store.engine.dialect.name != "sqlite":
+        try:
+            with store.engine.connect() as connection:
+                revision = connection.execute(
+                    text("SELECT version_num FROM alembic_version"),
+                ).scalar_one()
+        except Exception as exc:
+            raise RuntimeError(
+                "Cannot read the database schema revision. Run `python -m alembic upgrade head` "
+                "from the repository root before starting Nerva."
+            ) from exc
+        if revision != EXPECTED_DATABASE_REVISION:
+            raise RuntimeError(
+                f"Database schema revision is {revision!r}, expected "
+                f"{EXPECTED_DATABASE_REVISION!r}. Run `python -m alembic upgrade head` "
+                "from the repository root before starting Nerva."
+            )
     configured_hash = hash_password(settings.admin_password)
     existing = store.get_user_by_username(settings.admin_username)
     password_matches = bool(existing and verify_password(settings.admin_password, existing.get("password_hash")))
@@ -303,10 +325,12 @@ def recover_interrupted_image_work() -> None:
     removed = cleanup_stale_directories()
     interrupted = store.fail_interrupted_image_sources()
     interrupted_chats = store.fail_interrupted_chat_messages()
-    if removed or interrupted or interrupted_chats:
+    interrupted_research = store.fail_interrupted_research_messages()
+    if removed or interrupted or interrupted_chats or interrupted_research:
         logger.warning(
-            "startup recovery removed_temp_dirs=%s interrupted_sources=%s interrupted_chats=%s",
-            removed, interrupted, interrupted_chats,
+            "startup recovery removed_temp_dirs=%s interrupted_sources=%s "
+            "interrupted_chats=%s interrupted_research=%s",
+            removed, interrupted, interrupted_chats, interrupted_research,
         )
     cutoff = now_utc() - timedelta(minutes=settings.index_recovery_age_minutes)
     for pending in store.list_pending_index_documents(
@@ -380,7 +404,7 @@ def health_ready():
         with store.engine.connect() as connection:
             connection.execute(text("SELECT 1"))
             revision = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        if revision != "0012":
+        if revision != EXPECTED_DATABASE_REVISION:
             return error_response(
                 503, "服务正在等待数据库升级", code="DATABASE_MIGRATION_PENDING", retryable=True,
             )
@@ -760,6 +784,15 @@ def process_source_background(user_id: str, source_id: str) -> None:
         metrics.adjust_gauge("nerva_image_tasks_active", -1)
 
 
+def process_research_source_background(user_id: str, source_id: str) -> None:
+    try:
+        process_source(user_id, source_id)
+    except HTTPException:
+        metrics.increment("nerva_research_ingestions_total", status="failed")
+    else:
+        metrics.increment("nerva_research_ingestions_total", status="completed")
+
+
 def _recognize_temporary_image(source_id: str, image: TemporaryImage) -> tuple[int, str]:
     try:
         result = ocr.recognize(
@@ -966,6 +999,9 @@ def get_change_set(change_set_id: str, user: dict = Depends(current_user)):
 def apply_change_set(change_set_id: str, payload: ApplyChangeSet, user: dict = Depends(current_user)):
     result = store.apply_change_set(user["id"], change_set_id, payload.accepted_item_ids)
     if not result:
+        existing = store.get_change_set(user["id"], change_set_id)
+        if existing and existing["status"] in {"applied", "partially_applied"}:
+            return existing
         raise HTTPException(404, "Change set not found or is no longer applicable")
     for item in result.get("items", []):
         if (
@@ -1468,6 +1504,259 @@ def retry_chat_message(
     return _chat_streaming_response(
         user["id"], *turn, request.state.request_id, request.state.client_type,
     )
+
+
+@app.post("/v1/research/sessions", response_model=ResearchSession, status_code=201)
+def create_research_session(
+    payload: ResearchSessionCreate, user: dict = Depends(current_user),
+):
+    return store.create_research_session(user["id"], payload.title)
+
+
+@app.get("/v1/research/sessions", response_model=list[ResearchSession])
+def list_research_sessions(user: dict = Depends(current_user)):
+    return store.list_research_sessions(user["id"])
+
+
+@app.patch("/v1/research/sessions/{session_id}", response_model=ResearchSession)
+def update_research_session(
+    session_id: str, payload: ResearchSessionUpdate, user: dict = Depends(current_user),
+):
+    result = store.update_research_session(user["id"], session_id, payload.title)
+    if not result:
+        raise HTTPException(404, "Research session not found")
+    return result
+
+
+@app.delete("/v1/research/sessions/{session_id}", status_code=204)
+def delete_research_session(
+    session_id: str, response: Response, user: dict = Depends(current_user),
+):
+    result = store.delete_research_session(user["id"], session_id)
+    if result == "not_found":
+        raise HTTPException(404, "Research session not found")
+    if result == "busy":
+        raise HTTPException(status.HTTP_409_CONFLICT, detail={
+            "message": "当前研究仍在生成回复", "code": "RESEARCH_SESSION_BUSY",
+        })
+    response.status_code = status.HTTP_204_NO_CONTENT
+    return None
+
+
+@app.get(
+    "/v1/research/sessions/{session_id}/messages",
+    response_model=list[ResearchMessage],
+)
+def list_research_messages(session_id: str, user: dict = Depends(current_user)):
+    result = store.list_research_messages(user["id"], session_id)
+    if result is None:
+        raise HTTPException(404, "Research session not found")
+    return result
+
+
+def _research_stream(
+    user_id: str, user_message: dict, assistant_message: dict,
+    request_id: str, client_type: str,
+):
+    completed = False
+    outcome = "interrupted"
+    answer_parts: list[str] = []
+    citations: list[dict] = []
+    basis = "ai"
+    tokens = bind_request_context(request_id, client_type)
+    user_token = bind_user_context(user_id)
+    metrics.adjust_gauge("nerva_sse_active", 1)
+    try:
+        yield sse_event("start", {
+            "session_id": assistant_message["session_id"],
+            "user_message_id": user_message["id"],
+            "assistant_message_id": assistant_message["id"],
+            "requested_mode": assistant_message["requested_mode"],
+        })
+        messages = store.list_research_messages(user_id, assistant_message["session_id"])
+        if messages is None:
+            raise RuntimeError("Research session disappeared")
+        history = [
+            {"role": item["role"], "content": item["content"]}
+            for item in messages
+            if item["status"] == "completed" and item["content"]
+        ][-20:]
+        for event in ai.stream_research(history, assistant_message["requested_mode"]):
+            if event.get("type") == "delta":
+                delta = event.get("text") or ""
+                if delta:
+                    answer_parts.append(delta)
+                    yield sse_event("delta", {"text": delta})
+            elif event.get("type") == "sources":
+                basis = event.get("basis") or "ai"
+                accessed_at = now_utc().isoformat()
+                citations = [
+                    {
+                        "ordinal": index, "title": source["title"],
+                        "url": source["url"], "domain": source["domain"],
+                        "accessed_at": accessed_at,
+                    }
+                    for index, source in enumerate(event.get("sources") or [], start=1)
+                ]
+                yield sse_event("sources", {"citations": citations, "basis": basis})
+        answer = "".join(answer_parts).strip()
+        if not answer:
+            raise AIProviderError("AI_INVALID_RESPONSE", "研究服务没有返回可用内容", retryable=True)
+        saved = store.complete_research_message(
+            user_id, assistant_message["id"], content=answer,
+            basis=basis, citations=citations,
+        )
+        if not saved:
+            raise RuntimeError("Research message is no longer generating")
+        completed = True
+        outcome = "completed"
+        yield sse_event("done", {"message": saved})
+    except GeneratorExit:
+        if not completed:
+            store.fail_research_message(
+                user_id, assistant_message["id"], "RESEARCH_CANCELLED", cancelled=True,
+            )
+            completed = True
+            outcome = "cancelled"
+        raise
+    except AIProviderError as exc:
+        store.fail_research_message(user_id, assistant_message["id"], exc.code)
+        metrics.increment("nerva_model_calls_total", operation="research", status="failed")
+        completed = True
+        outcome = "failed"
+        if exc.code == "RESEARCH_WEB_SOURCE_REQUIRED":
+            message = "联网检索没有找到可验证来源，可改用仅 AI 模式重试"
+        elif exc.code == "RESEARCH_WEB_UNAVAILABLE":
+            message = "当前 AI Provider 不支持联网检索，可改用仅 AI 模式"
+        else:
+            message = "知识研究暂时失败，请稍后重试"
+        yield sse_event("error", {
+            "code": exc.code, "message": message,
+            "retryable": exc.retryable, "request_id": request_id,
+        })
+    except Exception:
+        logger.exception("research generation failed message_id=%s", assistant_message["id"])
+        store.fail_research_message(
+            user_id, assistant_message["id"], "RESEARCH_INTERNAL_ERROR",
+        )
+        completed = True
+        outcome = "failed"
+        yield sse_event("error", {
+            "code": "RESEARCH_INTERNAL_ERROR", "message": "知识研究失败，请稍后重试",
+            "retryable": True, "request_id": request_id,
+        })
+    finally:
+        if not completed:
+            store.fail_research_message(
+                user_id, assistant_message["id"], "RESEARCH_CANCELLED", cancelled=True,
+            )
+        metrics.adjust_gauge("nerva_sse_active", -1)
+        metrics.increment("nerva_research_stream_total", outcome=outcome)
+        try:
+            from .logging_config import user_id_var
+            user_id_var.reset(user_token)
+        except (ValueError, RuntimeError):
+            pass
+        clear_request_context(tokens)
+
+
+def _research_streaming_response(
+    user_id: str, user_message: dict, assistant_message: dict,
+    request_id: str, client_type: str,
+):
+    return StreamingResponse(
+        _research_stream(user_id, user_message, assistant_message, request_id, client_type),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.post("/v1/research/sessions/{session_id}/messages")
+def create_research_message(
+    session_id: str, payload: ResearchMessageCreate, request: Request,
+    user: dict = Depends(current_user),
+):
+    try:
+        turn = store.create_research_turn(
+            user["id"], session_id, payload.content, payload.mode,
+            getattr(ai, "research_model", ai.model),
+        )
+    except ResearchSessionBusy:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail={
+            "message": "当前研究仍在生成回复", "code": "RESEARCH_ALREADY_GENERATING",
+        })
+    if not turn:
+        raise HTTPException(404, "Research session not found")
+    return _research_streaming_response(
+        user["id"], *turn, request.state.request_id, request.state.client_type,
+    )
+
+
+@app.post("/v1/research/messages/{message_id}/retry")
+def retry_research_message(
+    message_id: str, request: Request, payload: ResearchRetry | None = None,
+    user: dict = Depends(current_user),
+):
+    try:
+        turn = store.retry_research_message(
+            user["id"], message_id, payload.mode if payload else None,
+        )
+    except ResearchSessionBusy:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail={
+            "message": "当前研究仍在生成回复", "code": "RESEARCH_ALREADY_GENERATING",
+        })
+    if not turn:
+        raise HTTPException(404, "Retryable research message not found")
+    return _research_streaming_response(
+        user["id"], *turn, request.state.request_id, request.state.client_type,
+    )
+
+
+def _research_ingestion_markdown(question: str, message: dict) -> str:
+    lines = ["# 研究问题", "", question.strip(), "", "# 研究回答", "", message["content"].strip()]
+    lines.extend(["", "# 研究来源（溯源元数据，请勿作为独立知识事实）", ""])
+    if message.get("basis") == "web" and message.get("citations"):
+        lines.append("获取方式：联网检索与 AI 综合。")
+        for citation in message["citations"]:
+            lines.append(f"{citation['ordinal']}. [{citation['title']}]({citation['url']})")
+    else:
+        lines.append("获取方式：AI 模型通用知识；本回答未经联网验证。")
+    return "\n".join(lines).strip() + "\n"
+
+
+@app.post(
+    "/v1/research/messages/{message_id}/ingestion",
+    response_model=SourceProcessing, status_code=202,
+)
+def create_research_ingestion(
+    message_id: str, background_tasks: BackgroundTasks,
+    user: dict = Depends(current_user),
+):
+    message = store.get_research_message(user["id"], message_id)
+    if not message or message["role"] != "assistant" or message["status"] != "completed":
+        raise HTTPException(404, "Completed research message not found")
+    messages = store.list_research_messages(user["id"], message["session_id"])
+    if messages is None:
+        raise HTTPException(404, "Research session not found")
+    question = next((
+        item["content"] for item in reversed(messages)
+        if item["role"] == "user" and item["created_at"] <= message["created_at"]
+    ), "研究结果")
+    session = store.get_research_session(user["id"], message["session_id"])
+    title = (session or {}).get("title") or question[:160]
+    source = store.create_research_ingestion_source(
+        user["id"], message_id,
+        title=title, content=_research_ingestion_markdown(question, message),
+    )
+    if not source:
+        raise HTTPException(404, "Completed research message not found")
+    if source["processing_status"] == "received":
+        background_tasks.add_task(
+            process_research_source_background, user["id"], source["id"],
+        )
+    processing = store.get_source_processing(user["id"], source["id"])
+    assert processing is not None
+    return source_processing_payload(processing)
 
 
 @app.get("/v1/memories", response_model=list[Memory])

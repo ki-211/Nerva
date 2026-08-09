@@ -32,6 +32,7 @@ export function ImageCapture({
   const [uploadProgress, setUploadProgress] = useState(0);
   const [processing, setProcessing] = useState<SourceProcessing | null>(null);
   const [localError, setLocalError] = useState('');
+  const [dragActive, setDragActive] = useState(false);
 
   useEffect(() => { imagesRef.current = images; }, [images]);
   useEffect(() => () => {
@@ -71,7 +72,23 @@ export function ImageCapture({
 
   const dropFiles = (event: DragEvent<HTMLLabelElement>) => {
     event.preventDefault();
+    event.stopPropagation();
+    setDragActive(false);
     if (!busy) addFiles(Array.from(event.dataTransfer.files));
+  };
+
+  const dragOver = (event: DragEvent<HTMLLabelElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!busy) {
+      event.dataTransfer.dropEffect = 'copy';
+      setDragActive(true);
+    }
+  };
+
+  const dragLeave = (event: DragEvent<HTMLLabelElement>) => {
+    event.preventDefault();
+    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragActive(false);
   };
 
   const remove = (id: string) => setImages((current) => {
@@ -137,7 +154,13 @@ export function ImageCapture({
       <div className="panel-title"><span>01</span><div><b>上传文字资料图片</b><small>图片只用于临时 OCR，处理结束后立即删除</small></div></div>
       <input value={title} onChange={(event) => onTitleChange(event.target.value)} placeholder="标题（可选）" />
       <textarea value={note} onChange={(event) => onNoteChange(event.target.value)} placeholder="补充说明（可选）" />
-      <label className={`image-dropzone ${busy ? 'disabled' : ''}`} onDragOver={(event) => event.preventDefault()} onDrop={dropFiles}>
+      <label
+        className={`image-dropzone ${busy ? 'disabled' : ''} ${dragActive ? 'drag-active' : ''}`}
+        onDragEnter={dragOver}
+        onDragOver={dragOver}
+        onDragLeave={dragLeave}
+        onDrop={dropFiles}
+      >
         <input type="file" accept="image/jpeg,image/png,image/webp" multiple disabled={busy} onChange={chooseFiles} />
         <b>拖拽图片到这里，或点击选择</b>
         <small>JPG / PNG / WebP · 最多 10 张 · 单张 6 MB</small>

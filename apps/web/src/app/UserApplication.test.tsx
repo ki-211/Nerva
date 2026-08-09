@@ -1,0 +1,64 @@
+import { render, screen, waitFor } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { UserApplication } from './UserApplication';
+import { configureApiTransport } from '../lib/api';
+
+afterEach(() => {
+  configureApiTransport((input, init) => globalThis.fetch(input, init));
+  vi.restoreAllMocks();
+});
+
+describe('user-only application entry', () => {
+  it('shows only email verification login', async () => {
+    configureApiTransport(vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      error: { code: 'AUTH_REQUIRED', message: '请先登录' },
+    }), { status: 401, headers: { 'Content-Type': 'application/json' } })));
+
+    render(<MemoryRouter initialEntries={['/login']}><UserApplication /></MemoryRouter>);
+
+    expect(await screen.findByRole('heading', { name: '邮箱验证码登录' })).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: '邮箱' })).toBeInTheDocument();
+    expect(screen.queryByText(/管理员/)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/密码/)).not.toBeInTheDocument();
+  });
+
+  it('does not expose an administrator route', async () => {
+    configureApiTransport(vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      error: { code: 'AUTH_REQUIRED', message: '请先登录' },
+    }), { status: 401, headers: { 'Content-Type': 'application/json' } })));
+
+    render(<MemoryRouter initialEntries={['/admin']}><UserApplication /></MemoryRouter>);
+
+    await waitFor(() => expect(screen.getByRole('heading', { name: '邮箱验证码登录' })).toBeInTheDocument());
+    expect(screen.queryByText(/管理员控制台/)).not.toBeInTheDocument();
+  });
+
+  it('keeps the research session list inside the application content grid', async () => {
+    Element.prototype.scrollIntoView = vi.fn();
+    configureApiTransport(vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      const payload = url.endsWith('/v1/auth/me')
+        ? {
+          id: 'user-1', email: 'user@example.com', display_name: 'Research User',
+          role: 'user', created_at: '2026-08-09T00:00:00Z',
+        }
+        : [];
+      return Promise.resolve(new Response(JSON.stringify(payload), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      }));
+    }));
+
+    render(<MemoryRouter initialEntries={['/research']}><UserApplication /></MemoryRouter>);
+
+    await waitFor(() => expect(document.querySelector('.research-sessions')).not.toBeNull());
+    const shellSidebar = document.querySelector<HTMLElement>('.app-shell > aside');
+    const researchSidebar = document.querySelector<HTMLElement>('.research-sessions');
+    const researchLayout = document.querySelector<HTMLElement>('.research-layout');
+    expect(shellSidebar).not.toBeNull();
+    expect(shellSidebar?.parentElement).toHaveClass('app-shell');
+    expect(researchLayout).toContainElement(researchSidebar);
+    expect(researchLayout?.firstElementChild).toBe(researchSidebar);
+    expect(researchLayout?.lastElementChild).toHaveClass('research-workspace');
+  });
+});

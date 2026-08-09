@@ -10,7 +10,7 @@ $patterns = @(
 
 $files = Get-ChildItem -Path $PSScriptRoot\.. -Recurse -File |
   Where-Object {
-    $_.FullName -notmatch '\\(node_modules|dist|\.git|data|\.venv)\\' -and
+    $_.FullName -notmatch '\\(node_modules|dist|dist-user|target|\.git|data|\.venv)\\' -and
     $_.Name -notlike '.env*' -and
     $_.Name -ne '.env.example' -and
     $_.Extension -notin @('.png', '.jpg', '.jpeg', '.db')

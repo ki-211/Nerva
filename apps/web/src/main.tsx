@@ -12,6 +12,7 @@ import { LibraryView, GrowthView } from './features/documents/knowledgeViews';
 import { MemoriesPage } from './features/memories/MemoriesPage';
 import { ChatPage } from './features/chat/ChatPage';
 import { SearchPage } from './features/search/SearchPage';
+import { ResearchPage } from './features/research/ResearchPage';
 import { AdminPage } from './features/admin/AdminPage';
 import { PrintExportPage } from './features/documents/exportViews';
 import { ErrorBoundary } from './app/ErrorBoundary';
@@ -121,7 +122,9 @@ function KnowledgeApp({ user, onSignedOut }: { user: User; onSignedOut: () => vo
   const [libraryDirty, setLibraryDirty] = useState(false);
   const [busy, setBusy] = useState(false);
 
-  const view = location.pathname.startsWith('/search')
+  const view = location.pathname.startsWith('/research')
+    ? 'research'
+    : location.pathname.startsWith('/search')
     ? 'search'
     : location.pathname.startsWith('/admin')
     ? 'admin'
@@ -141,6 +144,8 @@ function KnowledgeApp({ user, onSignedOut }: { user: User; onSignedOut: () => vo
     view === 'growth' ? decodeURIComponent(location.pathname.split('/')[2] || '') || null : null;
   const selectedChatSessionId =
     view === 'chat' ? decodeURIComponent(location.pathname.split('/')[2] || '') || null : null;
+  const selectedResearchSessionId =
+    view === 'research' ? decodeURIComponent(location.pathname.split('/')[2] || '') || null : null;
   const selectedPublicDocumentId = new URLSearchParams(location.search).get('public_document');
 
   useEffect(() => {
@@ -212,6 +217,14 @@ function KnowledgeApp({ user, onSignedOut }: { user: User; onSignedOut: () => vo
               : `/library/${encodeURIComponent(id)}`
           )}
           onOpenCapture={() => navigate('/')}
+        />
+      )}
+
+      {view === 'research' && (
+        <ResearchPage
+          sessionId={selectedResearchSessionId}
+          onOpenSession={(id) => navigate(id ? `/research/${encodeURIComponent(id)}` : '/research')}
+          onRefresh={handleRefresh}
         />
       )}
 

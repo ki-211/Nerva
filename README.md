@@ -1,5 +1,81 @@
 # Nerva
 
+## 构建 Windows EXE
+
+用户桌面端位于 `apps/user-desktop`，使用 Tauri 2 构建。它只打包普通用户 React 页面，不会把 Python、PostgreSQL、SMTP 密钥或百炼密钥打进 EXE；使用时必须能连接到单独运行的 Nerva API。
+
+### 1. 安装构建环境
+
+- Windows 10/11 x64。
+- Node.js 与 pnpm。
+- Rust stable MSVC 工具链，以及 `x86_64-pc-windows-msvc` target。
+- Visual Studio 2022 Build Tools，安装“使用 C++ 的桌面开发”和 Windows SDK。
+- WebView2 Runtime。安装程序使用嵌入式 bootstrapper，在目标电脑缺少 WebView2 时会联网安装。
+
+首次准备仓库：
+
+```powershell
+pnpm install
+rustup default stable-msvc
+rustup target add x86_64-pc-windows-msvc
+
+# 后端环境；如果已经有 .venv 可以跳过创建步骤
+py -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r apps/api/requirements.txt
+Copy-Item .env.example .env
+.\.venv\Scripts\python.exe -m alembic upgrade head
+```
+
+启动后端并确认就绪：
+
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --app-dir apps/api --port 8000
+Invoke-RestMethod http://127.0.0.1:8000/health/ready
+```
+
+健康检查应返回 `status: ready` 和当前数据库迁移版本。出现 `DATABASE_MIGRATION_PENDING` 或缺少新表时，先在仓库根目录重新执行 `.\.venv\Scripts\python.exe -m alembic upgrade head`。
+
+### 2. 配置 EXE 使用的后端
+
+编辑 `apps/user-desktop/user-profile.json`：
+
+```json
+{
+  "apiUrl": "http://localhost:8000"
+}
+```
+
+`apiUrl` 必须是 `http/https` Origin，不能包含账号、密码、查询参数或 fragment。发布给其他电脑时应改成实际部署的 HTTPS API 地址。构建脚本会同时写入前端 API 地址，并把 Tauri HTTP 权限精确限制到该 Origin；外部研究来源只允许通过系统浏览器打开 `http/https` 地址。
+
+### 3. 开发、检查和打包
+
+在仓库根目录运行：
+
+```powershell
+# 启动带热更新的桌面开发版；后端需提前启动
+pnpm dev:user-desktop
+
+# 可选：只构建 EXE 使用的隔离前端，并检查是否混入管理员页面
+pnpm build:user-desktop:web
+
+# Rust 格式检查、测试、Clippy 和 Cargo check
+pnpm check:user-desktop
+
+# 生产构建，并生成 x64 NSIS 安装包
+pnpm build:user-desktop
+```
+
+构建成功后的主要产物：
+
+```text
+apps/user-desktop/src-tauri/target/x86_64-pc-windows-msvc/release/nerva-user-desktop.exe
+apps/user-desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/Nerva_<版本号>_x64-setup.exe
+```
+
+安装包采用当前用户安装模式。当前版本未做代码签名，Windows 可能提示“未知发布者”；正式分发前应在 CI 中配置代码签名证书。修改前端后必须重新执行 `pnpm build:user-desktop`，关闭旧 EXE，再用新安装包覆盖安装。
+
+更完整的桌面端说明见 [Windows 用户端构建文档](docs/windows-user-desktop.md)。
+
 ## 管理员与大众知识库
 
 Nerva 提供应用内大众知识库：所有已登录用户可以阅读，只有管理员可以新增、编辑和下架。管理员控制台还会展示用户及知识库归属，普通用户既看不到入口，也无法访问管理员 API。

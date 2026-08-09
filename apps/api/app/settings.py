@@ -25,6 +25,18 @@ def load_spring_mail_config() -> dict:
 
 
 spring_mail = load_spring_mail_config()
+TAURI_DESKTOP_ORIGIN = "http://tauri.localhost"
+
+
+def trusted_cors_origins() -> tuple[str, ...]:
+    configured = (
+        value.strip()
+        for value in os.getenv(
+            "NERVA_CORS_ORIGINS",
+            "http://localhost:5173,http://127.0.0.1:5173",
+        ).split(",")
+    )
+    return tuple(dict.fromkeys((*filter(None, configured), TAURI_DESKTOP_ORIGIN)))
 
 
 @dataclass(frozen=True)
@@ -48,6 +60,9 @@ class Settings:
         "https://dashscope.aliyuncs.com/compatible-mode/v1",
     )
     text_model: str = os.getenv("NERVA_TEXT_MODEL", "qwen3.7-plus")
+    research_model: str = os.getenv("NERVA_RESEARCH_MODEL", "").strip() or os.getenv(
+        "NERVA_TEXT_MODEL", "qwen3.7-plus",
+    )
     ocr_model: str = os.getenv("NERVA_OCR_MODEL", "qwen3.5-ocr")
     embedding_model: str = os.getenv("NERVA_EMBEDDING_MODEL", "text-embedding-v4")
     rerank_model: str = os.getenv("NERVA_RERANK_MODEL", "qwen3-rerank")
@@ -74,14 +89,7 @@ class Settings:
     session_cookie_name: str = os.getenv("NERVA_SESSION_COOKIE", "nerva_session")
     session_cookie_secure: bool = os.getenv("NERVA_COOKIE_SECURE", "false").lower() == "true"
     session_days: int = int(os.getenv("NERVA_SESSION_DAYS", "7"))
-    cors_origins: tuple[str, ...] = tuple(
-        value.strip()
-        for value in os.getenv(
-            "NERVA_CORS_ORIGINS",
-            "http://localhost:5173,http://127.0.0.1:5173",
-        ).split(",")
-        if value.strip()
-    )
+    cors_origins: tuple[str, ...] = trusted_cors_origins()
     verification_code_secret: str = os.getenv("NERVA_CODE_SECRET", "nerva-local-development-only")
     admin_username: str = os.getenv("NERVA_ADMIN_USERNAME", "admin")
     admin_password: str = os.getenv("NERVA_ADMIN_PASSWORD", "admin")
@@ -119,6 +127,8 @@ class Settings:
                 raise RuntimeError("DASHSCOPE_BASE_URL must use HTTPS")
             if not self.text_model.strip():
                 raise RuntimeError("NERVA_TEXT_MODEL is required when Bailian AI is enabled")
+            if not self.research_model.strip():
+                raise RuntimeError("NERVA_RESEARCH_MODEL must not be blank when configured")
             if not self.ocr_model.strip():
                 raise RuntimeError("NERVA_OCR_MODEL is required when Bailian AI is enabled")
             for name, value in (

@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-open-print-window"
+description = "Allows the bundled Nerva user interface to open a validated local print preview."
+commands.allow = ["open_print_window"]

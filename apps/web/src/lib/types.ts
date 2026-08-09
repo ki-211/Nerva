@@ -176,3 +176,50 @@ export type ApiStreamError = {
   retryable: boolean;
   request_id?: string;
 };
+
+export type ResearchMode = 'smart' | 'web' | 'ai';
+export type ResearchBasis = 'web' | 'ai';
+
+export type ResearchSession = {
+  id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ResearchCitation = {
+  ordinal: number;
+  title: string;
+  url: string;
+  domain: string;
+  accessed_at: string;
+};
+
+export type ResearchMessage = {
+  id: string;
+  session_id: string;
+  role: 'user' | 'assistant';
+  status: ChatMessageStatus;
+  content: string;
+  requested_mode: ResearchMode | null;
+  basis: ResearchBasis | null;
+  model: string | null;
+  citations: ResearchCitation[];
+  error_code: string | null;
+  ingestion_source_id: string | null;
+  created_at: string;
+  completed_at: string | null;
+};
+
+export type ResearchStreamHandlers = {
+  onStart: (payload: {
+    session_id: string;
+    user_message_id: string;
+    assistant_message_id: string;
+    requested_mode: ResearchMode;
+  }) => void;
+  onDelta: (text: string) => void;
+  onSources: (citations: ResearchCitation[], basis: ResearchBasis) => void;
+  onDone: (message: ResearchMessage) => void;
+  onError: (error: ApiStreamError) => void;
+};

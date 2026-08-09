@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { api } from '../../lib/api';
+import { adminApi } from '../../lib/adminApi';
 import type { User } from '../../lib/types';
 import './auth.css';
 
@@ -46,7 +47,7 @@ export function AuthPage({ onAuthenticated }: Props) {
     setError('');
     try {
       const user = mode === 'admin'
-        ? await api.adminLogin(username, password)
+        ? await adminApi.login(username, password)
         : await api.codeLogin(email, verificationCode);
       onAuthenticated(user);
       const from = (location.state as { from?: string } | null)?.from || '/';

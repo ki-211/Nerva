@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { ApiError, api } from '../../lib/api';
+import { openExternalUrl, openPrintView } from '../../lib/desktopRuntime';
 import type { ChangeItem, ChangeSet, Document, DocumentVersion, KnowledgeEvent } from '../../lib/types';
 import '../../styles/knowledge.css';
 
@@ -19,7 +20,11 @@ export function MarkdownView({ markdown }: { markdown: string }) {
       remarkPlugins={[remarkGfm]}
       components={{
         h1: heading('h1'), h2: heading('h2'), h3: heading('h3'),
-        a: ({ children, ...props }) => <a {...props} target="_blank" rel="noreferrer">{children}</a>,
+        a: ({ children, href, ...props }) => <a {...props} href={href} target="_blank" rel="noreferrer" onClick={(event) => {
+          if (!href || !/^https:\/\//i.test(href)) return;
+          event.preventDefault();
+          void openExternalUrl(href);
+        }}>{children}</a>,
       }}
     >{markdown}</ReactMarkdown>
   </div>;
@@ -149,7 +154,7 @@ export function LibraryView({ documents, selectedDocumentId, onSelect, onSaved, 
     const params = new URLSearchParams({ scope });
     if (id) params.set('document_id', id);
     if (selectedVersion != null) params.set('version', String(selectedVersion));
-    window.open(`/export/print?${params}`, '_blank', 'noopener,noreferrer');
+    void openPrintView(params.toString());
   };
   const runExport = async (name: string, task: () => Promise<void>) => {
     setExporting(name); setExportError('');

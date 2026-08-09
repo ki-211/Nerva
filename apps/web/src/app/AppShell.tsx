@@ -18,7 +18,9 @@ export function AppShell({
 }: Props) {
   const navigate = useNavigate();
   const location = useLocation();
-  const view = location.pathname.startsWith('/search')
+  const view = location.pathname.startsWith('/research')
+    ? 'research'
+    : location.pathname.startsWith('/search')
     ? 'search'
     : location.pathname.startsWith('/admin')
     ? 'admin'
@@ -56,6 +58,9 @@ export function AppShell({
         <nav>
           <button className={view === 'capture' ? 'active' : ''} onClick={() => go('/')}>
             ✦ 知识录入
+          </button>
+          <button className={view === 'research' ? 'active' : ''} onClick={() => go('/research')}>
+            ◈ 知识获取
           </button>
           <button className={view === 'chat' ? 'active' : ''} onClick={() => go('/chat')}>
             ◉ 与知识库对话

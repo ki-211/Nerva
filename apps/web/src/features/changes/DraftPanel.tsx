@@ -31,6 +31,14 @@ export function DraftPanel({
   onDiscard,
   onApply,
 }: Props) {
+  const reviewable = draft.status === 'proposed';
+  const statusLabel = {
+    applied: '已全部入库',
+    partially_applied: '已按选择入库',
+    rejected: '已放弃',
+    superseded: '已被新草案取代',
+  }[draft.status as Exclude<typeof draft.status, 'proposed'>];
+
   return (
     <div className="panel draft-panel">
       <div className="draft-head">
@@ -38,7 +46,7 @@ export function DraftPanel({
           <span className="tag">AI 变更草案</span>
           <h2>{draft.summary}</h2>
         </div>
-        <span className="safe">尚未修改知识库</span>
+        <span className="safe">{reviewable ? '尚未修改知识库' : statusLabel}</span>
       </div>
 
       {draftProcessing && draftProcessing.total_inputs > 0 && (
@@ -65,7 +73,8 @@ export function DraftPanel({
         <label className="change" key={item.id}>
           <input
             type="checkbox"
-            checked={selected.includes(item.id)}
+            checked={reviewable ? selected.includes(item.id) : item.accepted === true}
+            disabled={!reviewable}
             onChange={(e) => onToggle(item.id, e.target.checked)}
           />
           <div className="change-body">
@@ -86,7 +95,7 @@ export function DraftPanel({
         </label>
       ))}
 
-      {reprocessOpen && (
+      {reviewable && reprocessOpen && (
         <div className="reprocess-box">
           <label>
             给 AI 的组织建议（不会作为事实来源）
@@ -110,15 +119,17 @@ export function DraftPanel({
       )}
 
       <div className="draft-actions">
-        <button className="secondary" disabled={busy} onClick={onReprocessOpen}>
-          重新分析
-        </button>
-        <button className="secondary" onClick={onDiscard}>
-          放弃草案
-        </button>
-        <button disabled={busy || selected.length === 0} onClick={onApply}>
-          接受 {selected.length} 项变更
-        </button>
+        {reviewable ? <>
+          <button className="secondary" disabled={busy} onClick={onReprocessOpen}>
+            重新分析
+          </button>
+          <button className="secondary" onClick={onDiscard}>
+            放弃草案
+          </button>
+          <button disabled={busy || selected.length === 0} onClick={onApply}>
+            接受 {selected.length} 项变更
+          </button>
+        </> : <button className="secondary" onClick={onDiscard}>关闭入库结果</button>}
       </div>
     </div>
   );

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { api } from '../../lib/api';
+import { adminApi } from '../../lib/adminApi';
 import type { AdminUser, KnowledgeOwnership, User } from '../../lib/types';
 import { PublicLibraryPage } from '../documents/PublicLibraryPage';
 import './admin.css';
@@ -16,7 +16,7 @@ export function AdminPage({ user }: Props) {
   const [error, setError] = useState('');
 
   useEffect(() => {
-    Promise.all([api.adminUsers(), api.knowledgeOwnership()])
+    Promise.all([adminApi.users(), adminApi.knowledgeOwnership()])
       .then(([nextUsers, nextOwnership]) => {
         setUsers(nextUsers);
         setOwnership(nextOwnership);

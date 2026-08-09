@@ -5,6 +5,7 @@ import math
 import re
 import time
 from typing import Any, Literal, Protocol
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -15,6 +16,7 @@ from .prompts import (
     OCR_IMAGE_PROMPT, OCR_PROMPT_VERSION,
     PLAN_MERGE_PROMPT, MERGE_PROMPT_VERSION,
     EXTRACT_MEMORY_PROMPT, MEMORY_PROMPT_VERSION,
+    RESEARCH_PROMPT, RESEARCH_PROMPT_VERSION,
 )
 from .settings import settings
 from .monitoring import metrics
@@ -24,6 +26,57 @@ logger = logging.getLogger("nerva.ai")
 
 KnowledgeType = Literal["fact", "opinion", "claim_unverified", "definition", "procedure", "action_item"]
 AllowedOperation = Literal["CREATE_DOCUMENT", "ADD_BLOCK", "MARK_DUPLICATE", "REPORT_CONFLICT"]
+
+
+def _extract_research_sources(value: Any) -> list[dict]:
+    found: list[dict] = []
+    if isinstance(value, list):
+        for item in value:
+            found.extend(_extract_research_sources(item))
+        return found
+    if not isinstance(value, dict):
+        return found
+    url = value.get("url")
+    source_type = value.get("type")
+    if isinstance(url, str) and source_type in {"url", "url_citation"}:
+        found.append({"url": url, "title": value.get("title") or ""})
+    for key, item in value.items():
+        if key not in {"url", "title"}:
+            found.extend(_extract_research_sources(item))
+    return found
+
+
+def _deduplicate_research_sources(items: list[dict]) -> list[dict]:
+    result: list[dict] = []
+    seen: set[str] = set()
+    for item in items:
+        raw_url = str(item.get("url") or "").strip()
+        if not raw_url or len(raw_url) > 2048:
+            continue
+        try:
+            parsed = urlsplit(raw_url)
+            if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+                continue
+            if parsed.username or parsed.password:
+                continue
+            _ = parsed.port
+        except ValueError:
+            continue
+        canonical = urlunsplit((
+            parsed.scheme.lower(), parsed.netloc.lower(), parsed.path or "/", parsed.query, "",
+        ))
+        if canonical in seen:
+            continue
+        seen.add(canonical)
+        title = " ".join(str(item.get("title") or "").split())[:300]
+        result.append({
+            "url": canonical,
+            "title": title or parsed.hostname,
+            "domain": parsed.hostname.lower(),
+        })
+        if len(result) >= 20:
+            break
+    return result
 
 
 def _clean_title(value: str) -> str:
@@ -168,6 +221,7 @@ class AIAdapter(Protocol):
     def stream_chat(
         self, history: list[dict], sources: list[dict], *, memory_block: str = "",
     ): ...
+    def stream_research(self, history: list[dict], mode: str): ...
 
     def embed(self, texts: list[str]) -> list[list[float]]: ...
     def rerank(self, query: str, candidates: list[dict]) -> list[dict]: ...
@@ -347,6 +401,7 @@ class LocalDemoAI:
 
     provider = "local"
     model = "local-demo-v2"
+    research_model = "local-demo-v2"
 
     def extract_inputs(
         self, inputs: list[SourceInput], source_label: str | None,
@@ -426,6 +481,24 @@ class LocalDemoAI:
         for start in range(0, len(answer), 12):
             yield answer[start:start + 12]
 
+    def stream_research(self, history: list[dict], mode: str):
+        if mode == "web":
+            raise AIProviderError(
+                "RESEARCH_WEB_UNAVAILABLE", "本地演示 Provider 不支持联网检索",
+                retryable=False, status_code=503,
+            )
+        question = next(
+            (item.get("content", "") for item in reversed(history) if item.get("role") == "user"),
+            "当前问题",
+        )
+        answer = (
+            f"# {question[:80]}\n\n这是本地演示 AI 基于通用知识生成的研究回答。"
+            "该内容未联网验证，正式使用前请核对权威来源。"
+        )
+        for start in range(0, len(answer), 12):
+            yield {"type": "delta", "text": answer[start:start + 12]}
+        yield {"type": "sources", "sources": [], "basis": "ai"}
+
     def embed(self, texts: list[str]) -> list[list[float]]:
         return [_local_vector(text) for text in texts]
 
@@ -453,6 +526,7 @@ class BailianAI:
         if "YOUR_" in settings.dashscope_base_url or "WORKSPACE_ID" in settings.dashscope_base_url:
             raise RuntimeError("DASHSCOPE_BASE_URL still contains a placeholder")
         self.model = settings.text_model
+        self.research_model = getattr(settings, "research_model", settings.text_model)
         self.base_url = settings.dashscope_base_url.rstrip("/")
         self.embedding_base_url = settings.embedding_base_url.rstrip("/")
         self.rerank_base_url = settings.rerank_base_url.rstrip("/")
@@ -750,6 +824,112 @@ class BailianAI:
             "elapsed_ms": int((time.perf_counter() - started) * 1000),
             "prompt_tokens": (usage or {}).get("prompt_tokens"),
             "completion_tokens": (usage or {}).get("completion_tokens"),
+        })
+
+    def stream_research(self, history: list[dict], mode: str):
+        started = time.perf_counter()
+        emitted = False
+        completed = False
+        used_web = False
+        usage: dict = {}
+        sources: list[dict] = []
+        tools = [] if mode == "ai" else [{"type": "web_search"}]
+        body = {
+            "model": self.research_model,
+            "input": [
+                {"role": "system", "content": RESEARCH_PROMPT},
+                *[
+                    {"role": item["role"], "content": item["content"]}
+                    for item in history[-20:]
+                    if item.get("role") in {"user", "assistant"} and item.get("content")
+                ],
+            ],
+            "tools": tools,
+            "tool_choice": "none" if mode == "ai" else ("required" if mode == "web" else "auto"),
+            "enable_thinking": False,
+            "stream": True,
+        }
+        logger.info("research_stream_started", extra={
+            "event": "research_stream_started", "provider": self.provider,
+            "model": self.research_model, "prompt_version": RESEARCH_PROMPT_VERSION,
+            "mode": mode,
+        })
+        try:
+            with self.client.stream("POST", f"{self.base_url}/responses", json=body) as response:
+                if response.status_code >= 400:
+                    response.read()
+                    retryable = response.status_code == 429 or response.status_code >= 500
+                    code = "AI_RATE_LIMITED" if response.status_code == 429 else "AI_UPSTREAM_ERROR"
+                    upstream_code, upstream_message, request_id = _upstream_error_details(response)
+                    raise AIProviderError(
+                        code, "研究服务暂时不可用", retryable=retryable,
+                        status_code=503 if retryable else 502,
+                        upstream_status=response.status_code, upstream_code=upstream_code,
+                        upstream_message=upstream_message, request_id=request_id,
+                    )
+                for line in response.iter_lines():
+                    if not line or not line.startswith("data:"):
+                        continue
+                    raw = line[5:].strip()
+                    if not raw or raw == "[DONE]":
+                        continue
+                    try:
+                        event = json.loads(raw)
+                    except json.JSONDecodeError as exc:
+                        raise AIProviderError(
+                            "AI_INVALID_RESPONSE", "研究流式响应格式无效", retryable=True,
+                        ) from exc
+                    event_type = event.get("type")
+                    if event_type == "response.output_text.delta":
+                        delta = event.get("delta") or ""
+                        if delta:
+                            emitted = True
+                            yield {"type": "delta", "text": delta}
+                    if event_type in {"response.output_item.added", "response.output_item.done"}:
+                        item = event.get("item") or {}
+                        if item.get("type") == "web_search_call":
+                            used_web = True
+                        sources.extend(_extract_research_sources(item))
+                    if event_type in {"response.content_part.done", "response.completed"}:
+                        sources.extend(_extract_research_sources(event))
+                    if event_type == "response.completed":
+                        completed = True
+                        response_payload = event.get("response") or {}
+                        usage = response_payload.get("usage") or {}
+                        usage_tools = usage.get("x_tools") or {}
+                        used_web = used_web or bool((usage_tools.get("web_search") or {}).get("count"))
+        except AIProviderError:
+            raise
+        except httpx.TimeoutException as exc:
+            raise AIProviderError("AI_TIMEOUT", "研究响应超时", retryable=True, status_code=503) from exc
+        except httpx.RequestError as exc:
+            raise AIProviderError("AI_UNAVAILABLE", "无法连接研究服务", retryable=True, status_code=503) from exc
+        if not emitted or not completed:
+            raise AIProviderError("AI_INVALID_RESPONSE", "研究服务没有返回完整内容", retryable=True)
+        normalized_sources = _deduplicate_research_sources(sources)
+        if mode == "web" and not normalized_sources:
+            raise AIProviderError(
+                "RESEARCH_WEB_SOURCE_REQUIRED", "联网检索没有返回可验证来源",
+                retryable=False, status_code=502,
+            )
+        if used_web and not normalized_sources:
+            raise AIProviderError(
+                "RESEARCH_SOURCE_INVALID", "联网检索来源无效", retryable=True, status_code=502,
+            )
+        basis = "web" if normalized_sources else "ai"
+        yield {"type": "sources", "sources": normalized_sources, "basis": basis}
+        metrics.increment("nerva_model_calls_total", operation="research", status="success")
+        metrics.observe(
+            "nerva_model_call_duration", time.perf_counter() - started, operation="research",
+        )
+        logger.info("research_stream_completed", extra={
+            "event": "research_stream_completed", "provider": self.provider,
+            "model": self.research_model, "prompt_version": RESEARCH_PROMPT_VERSION,
+            "mode": mode, "basis": basis, "sources": len(normalized_sources),
+            "elapsed_ms": int((time.perf_counter() - started) * 1000),
+            "input_tokens": usage.get("input_tokens"),
+            "output_tokens": usage.get("output_tokens"),
+            "total_tokens": usage.get("total_tokens"),
         })
 
 

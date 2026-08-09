@@ -123,7 +123,8 @@ h1 {
   font-size: 13px;
 }
 
-main button {
+.capture-view button,
+.research-draft button {
   background: #1e684c;
   color: white;
   padding: 11px 17px;
@@ -134,12 +135,14 @@ main button {
   cursor: pointer;
 }
 
-main button:disabled {
+.capture-view button:disabled,
+.research-draft button:disabled {
   opacity: 0.45;
   cursor: not-allowed;
 }
 
-main button.secondary {
+.capture-view button.secondary,
+.research-draft button.secondary {
   background: #eeeee9 !important;
   color: #47524c !important;
 }

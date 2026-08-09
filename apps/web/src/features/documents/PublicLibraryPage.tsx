@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api } from '../../lib/api';
+import { adminApi } from '../../lib/adminApi';
 import type { Document, User } from '../../lib/types';
 import { MarkdownView } from './knowledgeViews';
 import '../../styles/knowledge.css';
@@ -58,8 +59,8 @@ export function PublicLibraryPage({ user, documentId, onOpen, onCountChange }: P
     setBusy(true); setError('');
     try {
       const saved = creating
-        ? await api.createPublicDocument(title.trim(), markdown.trim())
-        : await api.updatePublicDocument(selected!.id, {
+        ? await adminApi.createPublicDocument(title.trim(), markdown.trim())
+        : await adminApi.updatePublicDocument(selected!.id, {
             title: title.trim(), markdown: markdown.trim(), base_version: selected!.version,
             ...(reason.trim() ? { reason: reason.trim() } : {}),
           });
@@ -70,7 +71,7 @@ export function PublicLibraryPage({ user, documentId, onOpen, onCountChange }: P
   const unpublish = async () => {
     if (!selected || !window.confirm(`下架《${selected.title}》吗？历史版本会保留。`)) return;
     setBusy(true);
-    try { await api.unpublishPublicDocument(selected.id); await refresh(); onOpen(''); }
+    try { await adminApi.unpublishPublicDocument(selected.id); await refresh(); onOpen(''); }
     catch (cause) { fail(cause, '下架公共文档失败'); }
     finally { setBusy(false); }
   };

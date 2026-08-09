@@ -1,0 +1,45 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Nerva",
+  "version": "../package.json",
+  "identifier": "app.nerva.user",
+  "build": {
+    "beforeDevCommand": "pnpm --dir ../web dev --host 127.0.0.1",
+    "beforeBuildCommand": "pnpm --dir ../web build:user",
+    "devUrl": "http://127.0.0.1:5173",
+    "frontendDist": "../../web/dist-user"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Nerva",
+        "url": "user.html",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 900,
+        "minHeight": 640,
+        "dragDropEnabled": false,
+        "center": true,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost blob: data:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost",
+      "devCsp": "default-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost ws://127.0.0.1:5173 http://127.0.0.1:5173"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.ico"],
+    "windows": {
+      "webviewInstallMode": { "type": "embedBootstrapper" },
+      "nsis": {
+        "installMode": "currentUser",
+        "installerIcon": "icons/icon.ico"
+      }
+    }
+  }
+}

@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from app import main
 from app.ai import AIProviderError, LocalDemoAI
 from app.store import Store
+from app.settings import TAURI_DESKTOP_ORIGIN, trusted_cors_origins
 
 
 class AuthApiTest(unittest.TestCase):
@@ -68,6 +69,19 @@ class AuthApiTest(unittest.TestCase):
             json={"email": "nobody@example.com", "verification_code": "123456"},
         )
         self.assertEqual(response.status_code, 403)
+
+    def test_tauri_desktop_origin_is_trusted(self):
+        response = self.client.post(
+            "/v1/auth/verification-codes",
+            headers={"Origin": "http://tauri.localhost", "X-Nerva-Client": "user-desktop"},
+            json={},
+        )
+        self.assertEqual(response.status_code, 422)
+        self.assertNotEqual(response.json()["error"]["code"], "UNTRUSTED_ORIGIN")
+
+    def test_tauri_origin_is_kept_when_environment_overrides_browser_origins(self):
+        with patch.dict("os.environ", {"NERVA_CORS_ORIGINS": "https://web.example"}):
+            self.assertEqual(trusted_cors_origins(), ("https://web.example", TAURI_DESKTOP_ORIGIN))
 
     def test_auth_required_and_cross_user_isolation(self):
         self.assertEqual(self.client.get("/health").status_code, 200)

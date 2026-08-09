@@ -77,6 +77,8 @@ sequenceDiagram
     API-->>Web: 返回已应用状态
 ```
 
+知识获取使用独立研究链路：React Web 与 Tauri EXE 共用 `/research` 页面，后端通过百炼 Responses API 在 `smart/web/ai` 三种模式下生成可追溯回答。研究阶段不召回个人知识库；只有用户点击“生成入库草案”后，当前回答才转换为 `kind=research` 的 Source 并进入上面的统一审批流程。
+
 ## 领域边界
 
 ### Identity
@@ -137,6 +139,9 @@ AI 永远生成变更草案而不是直接写正式文档。当前实现：
 | `GET` | `/v1/documents/{id}/versions` | 获取文档完整版本历史 |
 | `PUT` | `/v1/documents/{id}` | 以乐观并发控制保存人工编辑 |
 | `GET` | `/v1/knowledge-events` | 获取成长日志 |
+| `POST/GET` | `/v1/research/sessions` | 创建或列出持久化研究会话 |
+| `POST` | `/v1/research/sessions/{id}/messages` | 智能、联网或仅 AI 的流式知识获取 |
+| `POST` | `/v1/research/messages/{id}/ingestion` | 将单条研究回答幂等转换为入库 Source |
 | `GET` | `/v1/exports/markdown` | 导出单篇 Markdown 或全库 Markdown ZIP |
 | `GET` | `/v1/exports/knowledge-package` | 导出单篇谱系或全库 AI 结构化 ZIP |
 

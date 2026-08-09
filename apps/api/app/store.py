@@ -309,6 +309,43 @@ chat_messages = Table(
     ),
 )
 
+research_sessions = Table(
+    "research_sessions", metadata,
+    Column("id", String(40), primary_key=True),
+    Column("user_id", String(40), ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+    Column("title", String(80), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+)
+
+research_messages = Table(
+    "research_messages", metadata,
+    Column("id", String(40), primary_key=True),
+    Column("user_id", String(40), ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+    Column("session_id", String(40), ForeignKey("research_sessions.id", ondelete="CASCADE"), nullable=False),
+    Column("role", String(20), nullable=False),
+    Column("status", String(20), nullable=False),
+    Column("content", Text, nullable=False),
+    Column("requested_mode", String(20)),
+    Column("basis", String(20)),
+    Column("model", String(160)),
+    Column("citations", JSON().with_variant(JSONB, "postgresql"), nullable=False),
+    Column("error_code", String(80)),
+    Column("ingestion_source_id", String(40), ForeignKey("sources.id", ondelete="SET NULL"), unique=True),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("completed_at", DateTime(timezone=True)),
+    CheckConstraint("role IN ('user', 'assistant')", name="ck_research_messages_role"),
+    CheckConstraint(
+        "status IN ('generating', 'completed', 'failed', 'cancelled')",
+        name="ck_research_messages_status",
+    ),
+    CheckConstraint(
+        "requested_mode IS NULL OR requested_mode IN ('smart', 'web', 'ai')",
+        name="ck_research_messages_requested_mode",
+    ),
+    CheckConstraint("basis IS NULL OR basis IN ('web', 'ai')", name="ck_research_messages_basis"),
+)
+
 knowledge_events = Table(
     "knowledge_events", metadata,
     Column("id", String(40), primary_key=True),
@@ -366,6 +403,8 @@ Index("idx_memories_user_active", user_memories.c.user_id, user_memories.c.statu
 Index("idx_memories_user_created", user_memories.c.user_id, user_memories.c.created_at)
 Index("idx_chat_sessions_user_updated", chat_sessions.c.user_id, chat_sessions.c.updated_at)
 Index("idx_chat_messages_session_created", chat_messages.c.session_id, chat_messages.c.created_at)
+Index("idx_research_sessions_user_updated", research_sessions.c.user_id, research_sessions.c.updated_at)
+Index("idx_research_messages_session_created", research_messages.c.session_id, research_messages.c.created_at)
 Index("idx_audit_events_created", audit_events.c.created_at.desc())
 Index("idx_audit_events_actor_created", audit_events.c.actor_user_id, audit_events.c.created_at.desc())
 Index("idx_audit_events_action_target", audit_events.c.action, audit_events.c.target_id, audit_events.c.created_at.desc())
@@ -1744,6 +1783,263 @@ class Store:
             ).values(status="failed", error_code="CHAT_INTERRUPTED", completed_at=now_utc()))
             return result.rowcount
 
+    def create_research_session(self, user_id: str, title: str = "新研究") -> dict:
+        session_id = new_id("rch")
+        created_at = now_utc()
+        with self.engine.begin() as db:
+            db.execute(insert(research_sessions).values(
+                id=session_id, user_id=user_id, title=title,
+                created_at=created_at, updated_at=created_at,
+            ))
+        result = self.get_research_session(user_id, session_id)
+        assert result is not None
+        return result
+
+    def list_research_sessions(self, user_id: str) -> list[dict]:
+        with self.engine.connect() as db:
+            rows = db.execute(select(research_sessions).where(
+                research_sessions.c.user_id == user_id,
+            ).order_by(research_sessions.c.updated_at.desc()).limit(100)).mappings()
+            return [dict(row) for row in rows]
+
+    def get_research_session(self, user_id: str, session_id: str) -> dict | None:
+        with self.engine.connect() as db:
+            row = db.execute(select(research_sessions).where(
+                research_sessions.c.id == session_id,
+                research_sessions.c.user_id == user_id,
+            )).mappings().first()
+            return dict(row) if row else None
+
+    def update_research_session(self, user_id: str, session_id: str, title: str) -> dict | None:
+        with self.engine.begin() as db:
+            result = db.execute(update(research_sessions).where(
+                research_sessions.c.id == session_id,
+                research_sessions.c.user_id == user_id,
+            ).values(title=title, updated_at=now_utc()))
+            if result.rowcount != 1:
+                return None
+        return self.get_research_session(user_id, session_id)
+
+    def delete_research_session(self, user_id: str, session_id: str) -> str:
+        with self.engine.begin() as db:
+            owned = db.execute(select(research_sessions.c.id).where(
+                research_sessions.c.id == session_id,
+                research_sessions.c.user_id == user_id,
+            )).first()
+            if not owned:
+                return "not_found"
+            busy = db.execute(select(research_messages.c.id).where(
+                research_messages.c.session_id == session_id,
+                research_messages.c.user_id == user_id,
+                research_messages.c.status == "generating",
+            ).limit(1)).first()
+            if busy:
+                return "busy"
+            db.execute(delete(research_sessions).where(research_sessions.c.id == session_id))
+            return "deleted"
+
+    def list_research_messages(
+        self, user_id: str, session_id: str, limit: int = 200,
+    ) -> list[dict] | None:
+        with self.engine.connect() as db:
+            owned = db.execute(select(research_sessions.c.id).where(
+                research_sessions.c.id == session_id,
+                research_sessions.c.user_id == user_id,
+            )).first()
+            if not owned:
+                return None
+            rows = list(db.execute(select(research_messages).where(
+                research_messages.c.session_id == session_id,
+                research_messages.c.user_id == user_id,
+            ).order_by(
+                research_messages.c.created_at.desc(), research_messages.c.id.desc(),
+            ).limit(limit)).mappings())
+            return [dict(row) for row in reversed(rows)]
+
+    def get_research_message(self, user_id: str, message_id: str) -> dict | None:
+        with self.engine.connect() as db:
+            row = db.execute(select(research_messages).where(
+                research_messages.c.id == message_id,
+                research_messages.c.user_id == user_id,
+            )).mappings().first()
+            return dict(row) if row else None
+
+    def create_research_turn(
+        self, user_id: str, session_id: str, content: str, mode: str, model: str,
+    ) -> tuple[dict, dict] | None:
+        user_message_id = new_id("rmsg")
+        assistant_message_id = new_id("rmsg")
+        user_created_at = now_utc()
+        assistant_created_at = user_created_at + timedelta(microseconds=1)
+        with self.engine.begin() as db:
+            session = db.execute(select(research_sessions).where(
+                research_sessions.c.id == session_id,
+                research_sessions.c.user_id == user_id,
+            ).with_for_update()).mappings().first()
+            if not session:
+                return None
+            if db.execute(select(research_messages.c.id).where(
+                research_messages.c.session_id == session_id,
+                research_messages.c.user_id == user_id,
+                research_messages.c.status == "generating",
+            ).limit(1)).first():
+                raise ResearchSessionBusy()
+            has_user_message = db.execute(select(research_messages.c.id).where(
+                research_messages.c.session_id == session_id,
+                research_messages.c.role == "user",
+            ).limit(1)).first()
+            db.execute(insert(research_messages), [
+                {
+                    "id": user_message_id, "user_id": user_id, "session_id": session_id,
+                    "role": "user", "status": "completed", "content": content,
+                    "requested_mode": None, "basis": None, "model": None, "citations": [],
+                    "error_code": None, "ingestion_source_id": None,
+                    "created_at": user_created_at, "completed_at": user_created_at,
+                },
+                {
+                    "id": assistant_message_id, "user_id": user_id, "session_id": session_id,
+                    "role": "assistant", "status": "generating", "content": "",
+                    "requested_mode": mode, "basis": None, "model": model, "citations": [],
+                    "error_code": None, "ingestion_source_id": None,
+                    "created_at": assistant_created_at, "completed_at": None,
+                },
+            ])
+            updates = {"updated_at": assistant_created_at}
+            if not has_user_message and session["title"] == "新研究":
+                normalized = " ".join(content.split())
+                updates["title"] = normalized[:30] + ("…" if len(normalized) > 30 else "")
+            db.execute(update(research_sessions).where(
+                research_sessions.c.id == session_id,
+            ).values(**updates))
+        user_message = self.get_research_message(user_id, user_message_id)
+        assistant_message = self.get_research_message(user_id, assistant_message_id)
+        assert user_message is not None and assistant_message is not None
+        return user_message, assistant_message
+
+    def complete_research_message(
+        self, user_id: str, message_id: str, *, content: str, basis: str,
+        citations: list[dict],
+    ) -> dict | None:
+        completed_at = now_utc()
+        with self.engine.begin() as db:
+            row = db.execute(select(research_messages.c.session_id).where(
+                research_messages.c.id == message_id,
+                research_messages.c.user_id == user_id,
+                research_messages.c.role == "assistant",
+                research_messages.c.status == "generating",
+            )).first()
+            if not row:
+                return None
+            db.execute(update(research_messages).where(
+                research_messages.c.id == message_id,
+            ).values(
+                status="completed", content=content, basis=basis, citations=citations,
+                error_code=None, completed_at=completed_at,
+            ))
+            db.execute(update(research_sessions).where(
+                research_sessions.c.id == row.session_id,
+            ).values(updated_at=completed_at))
+        return self.get_research_message(user_id, message_id)
+
+    def fail_research_message(
+        self, user_id: str, message_id: str, error_code: str, *, cancelled: bool = False,
+    ) -> dict | None:
+        with self.engine.begin() as db:
+            result = db.execute(update(research_messages).where(
+                research_messages.c.id == message_id,
+                research_messages.c.user_id == user_id,
+                research_messages.c.role == "assistant",
+                research_messages.c.status == "generating",
+            ).values(
+                status="cancelled" if cancelled else "failed",
+                error_code=error_code, completed_at=now_utc(),
+            ))
+            if result.rowcount != 1:
+                return None
+        return self.get_research_message(user_id, message_id)
+
+    def retry_research_message(
+        self, user_id: str, message_id: str, mode: str | None = None,
+    ) -> tuple[dict, dict] | None:
+        with self.engine.begin() as db:
+            assistant = db.execute(select(research_messages).where(
+                research_messages.c.id == message_id,
+                research_messages.c.user_id == user_id,
+                research_messages.c.role == "assistant",
+                research_messages.c.status.in_(("failed", "cancelled")),
+            ).with_for_update()).mappings().first()
+            if not assistant:
+                return None
+            if db.execute(select(research_messages.c.id).where(
+                research_messages.c.session_id == assistant["session_id"],
+                research_messages.c.status == "generating",
+            ).limit(1)).first():
+                raise ResearchSessionBusy()
+            user_message = db.execute(select(research_messages).where(
+                research_messages.c.session_id == assistant["session_id"],
+                research_messages.c.user_id == user_id,
+                research_messages.c.role == "user",
+                research_messages.c.created_at <= assistant["created_at"],
+            ).order_by(
+                research_messages.c.created_at.desc(), research_messages.c.id.desc(),
+            ).limit(1)).mappings().first()
+            if not user_message:
+                return None
+            db.execute(update(research_messages).where(
+                research_messages.c.id == message_id,
+            ).values(
+                status="generating", content="", requested_mode=mode or assistant["requested_mode"],
+                basis=None, citations=[], error_code=None, completed_at=None,
+            ))
+        retried = self.get_research_message(user_id, message_id)
+        assert retried is not None
+        return dict(user_message), retried
+
+    def create_research_ingestion_source(
+        self, user_id: str, message_id: str, *, content: str, title: str,
+    ) -> dict | None:
+        with self.engine.begin() as db:
+            message = db.execute(select(research_messages).where(
+                research_messages.c.id == message_id,
+                research_messages.c.user_id == user_id,
+                research_messages.c.role == "assistant",
+                research_messages.c.status == "completed",
+            ).with_for_update()).mappings().first()
+            if not message:
+                return None
+            if message["ingestion_source_id"]:
+                row = db.execute(select(sources).where(
+                    sources.c.id == message["ingestion_source_id"],
+                    sources.c.user_id == user_id,
+                )).mappings().first()
+                return dict(row) if row else None
+            source_id = new_id("src")
+            db.execute(insert(sources).values(
+                id=source_id, user_id=user_id, kind="research", title=title[:160], content=content,
+                processing_status="received", ai_provider=None, ai_model=None,
+                prompt_version=None, error_code=None, error_message=None,
+                processing_stage="queued", processing_started_at=None,
+                total_inputs=0, processed_inputs=0, covered_inputs=0, extraction_attempts=0,
+                pending_supersedes_change_set_id=None, pending_analysis_instruction=None,
+                ocr_model=None, ocr_prompt_version=None, processed_at=None, created_at=now_utc(),
+            ))
+            db.execute(update(research_messages).where(
+                research_messages.c.id == message_id,
+            ).values(ingestion_source_id=source_id))
+            row = db.execute(select(sources).where(sources.c.id == source_id)).mappings().first()
+            assert row is not None
+            return dict(row)
+
+    def fail_interrupted_research_messages(self) -> int:
+        with self.engine.begin() as db:
+            result = db.execute(update(research_messages).where(
+                research_messages.c.role == "assistant",
+                research_messages.c.status == "generating",
+            ).values(
+                status="failed", error_code="RESEARCH_INTERRUPTED", completed_at=now_utc(),
+            ))
+            return result.rowcount
+
 
 class DocumentVersionConflict(RuntimeError):
     def __init__(self, current_version: int):
@@ -1752,4 +2048,8 @@ class DocumentVersionConflict(RuntimeError):
 
 
 class ChatSessionBusy(RuntimeError):
+    pass
+
+
+class ResearchSessionBusy(RuntimeError):
     pass

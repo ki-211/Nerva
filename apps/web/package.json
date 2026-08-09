@@ -6,10 +6,17 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
+    "build:user": "tsc --noEmit && vite build --mode user-desktop && node ../../scripts/assert-user-bundle.mjs",
     "test": "vitest run"
   },
   "dependencies": {
     "@sentry/react": "^10.69.0",
+    "@tauri-apps/api": "^2.0.0",
+    "@tauri-apps/plugin-dialog": "^2.0.0",
+    "@tauri-apps/plugin-fs": "^2.0.0",
+    "@tauri-apps/plugin-http": "^2.0.0",
+    "@tauri-apps/plugin-log": "^2.0.0",
+    "@tauri-apps/plugin-opener": "^2.0.0",
     "@vitejs/plugin-react": "^4.3.4",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",

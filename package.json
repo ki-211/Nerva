@@ -3,7 +3,10 @@
   "private": true,
   "scripts": {
     "dev:web": "pnpm --dir apps/web dev",
-    "build:web": "pnpm --dir apps/web build"
+    "build:web": "pnpm --dir apps/web build",
+    "dev:user-desktop": "node scripts/user-desktop.mjs dev",
+    "build:user-desktop:web": "node scripts/user-desktop.mjs frontend",
+    "build:user-desktop": "node scripts/user-desktop.mjs build",
+    "check:user-desktop": "node scripts/user-desktop.mjs check"
   }
 }
-

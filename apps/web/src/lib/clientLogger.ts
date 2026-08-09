@@ -1,4 +1,5 @@
 import * as Sentry from '@sentry/react';
+import { saveBlob, writeDesktopLog } from './desktopRuntime';
 
 export type ClientLogLevel = 'debug' | 'info' | 'warn' | 'error';
 export type ClientType = 'user-desktop' | 'admin-desktop' | 'web-development';
@@ -17,12 +18,6 @@ type LogEntry = {
   message: string;
   context: Record<string, unknown>;
 };
-
-declare global {
-  interface Window {
-    __NERVA_DESKTOP_LOG__?: (line: string) => void;
-  }
-}
 
 const CLIENT_TYPE = (import.meta.env.VITE_CLIENT_TYPE || 'web-development') as ClientType;
 const VERSION = import.meta.env.VITE_APP_VERSION || '0.1.0';
@@ -54,7 +49,9 @@ export function redact(value: unknown, key = '', depth = 0): unknown {
 }
 
 function write(level: ClientLogLevel, message: string, context: LogContext = {}, error?: unknown): void {
-  const safeContext = redact(context) as Record<string, unknown>;
+  const safeContext = redact(
+    error === undefined ? context : { ...context, cause: error },
+  ) as Record<string, unknown>;
   const entry: LogEntry = {
     timestamp: new Date().toISOString(), level, clientType: CLIENT_TYPE,
     version: VERSION, message: redactString(message), context: safeContext,
@@ -66,7 +63,7 @@ function write(level: ClientLogLevel, message: string, context: LogContext = {},
     const method = level === 'debug' ? 'debug' : level === 'info' ? 'info' : level === 'warn' ? 'warn' : 'error';
     console[method]('[Nerva]', entry.message, safeContext);
   }
-  window.__NERVA_DESKTOP_LOG__?.(line);
+  writeDesktopLog(level, line);
   if (level === 'error' && import.meta.env.PROD && import.meta.env.VITE_SENTRY_DSN) {
     Sentry.withScope((scope) => {
       scope.setTag('client_type', CLIENT_TYPE);
@@ -113,20 +110,5 @@ export async function exportDiagnosticLogs(): Promise<void> {
   const payload = entries.map((entry) => JSON.stringify(redact(entry))).join('\n');
   const blob = new Blob([payload], { type: 'application/x-ndjson' });
   const filename = `nerva-diagnostics-${new Date().toISOString().replace(/[:.]/g, '-')}.ndjson`;
-  const picker = (window as typeof window & {
-    showSaveFilePicker?: (options: unknown) => Promise<{ createWritable: () => Promise<{ write: (data: Blob) => Promise<void>; close: () => Promise<void> }> }>;
-  }).showSaveFilePicker;
-  if (picker) {
-    const handle = await picker({ suggestedName: filename, types: [{ description: 'Nerva 诊断日志', accept: { 'application/x-ndjson': ['.ndjson'] } }] });
-    const writable = await handle.createWritable();
-    await writable.write(blob);
-    await writable.close();
-    return;
-  }
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = filename;
-  anchor.click();
-  window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+  await saveBlob(blob, filename);
 }

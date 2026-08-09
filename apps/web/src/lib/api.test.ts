@@ -1,12 +1,71 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { api, ApiError } from './api';
+import { api, ApiError, configureApiTransport } from './api';
+import { configureDesktopRuntime } from './desktopRuntime';
 
 afterEach(() => {
+  configureApiTransport((input, init) => globalThis.fetch(input, init));
+  configureDesktopRuntime({});
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
 describe('API error parsing', () => {
+  it('uses the configured transport with desktop identity and cookie credentials', async () => {
+    const transport = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      id: 'user-1', email: 'user@example.com', role: 'user', created_at: '2026-01-01T00:00:00Z',
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+    configureApiTransport(transport);
+
+    await api.me();
+
+    const [, init] = transport.mock.calls[0] as [string, RequestInit];
+    expect(init.credentials).toBe('include');
+    expect(new Headers(init.headers).get('X-Nerva-Client')).toBeTruthy();
+    expect(new Headers(init.headers).get('X-Nerva-Version')).toBe('0.1.0');
+  });
+
+  it('accepts an empty 204 response after deleting a chat session', async () => {
+    const transport = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    configureApiTransport(transport);
+
+    await expect(api.deleteChatSession('session-1')).resolves.toBeUndefined();
+
+    expect(transport).toHaveBeenCalledOnce();
+    const [url, init] = transport.mock.calls[0] as [string, RequestInit];
+    expect(url).toContain('/v1/chat/sessions/session-1');
+    expect(init.method).toBe('DELETE');
+  });
+
+  it('sends image uploads as multipart without overriding the boundary', async () => {
+    const transport = vi.fn().mockResolvedValue(new Response(JSON.stringify({ source_id: 'source-1', status: 'processing' }), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    }));
+    const progress = vi.fn();
+    configureApiTransport(transport);
+
+    await api.uploadImages([new File(['image'], 'capture.png', { type: 'image/png' })], 'Capture', 'Note', progress);
+
+    const [, init] = transport.mock.calls[0] as [string, RequestInit];
+    expect(init.body).toBeInstanceOf(FormData);
+    expect(new Headers(init.headers).has('Content-Type')).toBe(false);
+    expect(progress.mock.calls.map(([value]) => value)).toEqual([5, 100]);
+  });
+
+  it('saves downloads through the injected desktop runtime', async () => {
+    const saveBlob = vi.fn().mockResolvedValue(undefined);
+    configureDesktopRuntime({ saveBlob });
+    configureApiTransport(vi.fn().mockResolvedValue(new Response('# Knowledge', {
+      status: 200,
+      headers: { 'Content-Type': 'text/markdown', 'Content-Disposition': 'attachment; filename="knowledge.md"' },
+    })));
+
+    await api.exportMarkdown('document', 'doc-1');
+
+    expect(saveBlob).toHaveBeenCalledOnce();
+    expect(saveBlob.mock.calls[0][0]).toMatchObject({ size: 11, type: 'text/markdown' });
+    expect(saveBlob.mock.calls[0][1]).toBe('knowledge.md');
+  });
+
   it('parses the new error envelope and request id', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
       error: { code: 'RATE_LIMITED', message: '操作过于频繁', retryable: true, request_id: 'req-new' },
@@ -80,6 +139,69 @@ describe('API error parsing', () => {
     const handlers = { onStart: vi.fn(), onDelta: vi.fn(), onMemoryCandidates: vi.fn(), onDone: vi.fn(), onError: vi.fn() };
     await expect(api.sendChatMessage('session-1', 'hello', handlers)).rejects.toMatchObject({
       code: 'CHAT_STREAM_INTERRUPTED', retryable: true,
+    });
+    expect(handlers.onDelta).toHaveBeenCalledWith('partial');
+  });
+
+  it('parses research start, sources, and done events', async () => {
+    const message = {
+      id: 'assistant-1', session_id: 'research-1', role: 'assistant', status: 'completed',
+      content: 'A sourced answer', requested_mode: 'web', basis: 'web', model: 'qwen',
+      citations: [{
+        ordinal: 1, title: 'Primary source', url: 'https://example.com/source',
+        domain: 'example.com', accessed_at: '2026-08-09T00:00:00Z',
+      }],
+      error_code: null, ingestion_source_id: null,
+      created_at: '2026-08-09T00:00:00Z', completed_at: '2026-08-09T00:00:01Z',
+    };
+    const payload = [
+      'event: start\ndata: {"session_id":"research-1","user_message_id":"user-1","assistant_message_id":"assistant-1","requested_mode":"web"}\n\n',
+      'event: delta\ndata: {"text":"A sourced answer"}\n\n',
+      `event: sources\ndata: ${JSON.stringify({ citations: message.citations, basis: 'web' })}\n\n`,
+      `event: done\ndata: ${JSON.stringify({ message })}\n\n`,
+    ].join('');
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(payload));
+        controller.close();
+      },
+    });
+    const transport = vi.fn().mockResolvedValue(new Response(stream, {
+      status: 200, headers: { 'Content-Type': 'text/event-stream' },
+    }));
+    configureApiTransport(transport);
+    const handlers = {
+      onStart: vi.fn(), onDelta: vi.fn(), onSources: vi.fn(), onDone: vi.fn(), onError: vi.fn(),
+    };
+
+    await api.sendResearchMessage('research-1', 'question', 'web', handlers);
+
+    expect(handlers.onStart).toHaveBeenCalledWith(expect.objectContaining({ requested_mode: 'web' }));
+    expect(handlers.onDelta).toHaveBeenCalledWith('A sourced answer');
+    expect(handlers.onSources).toHaveBeenCalledWith(message.citations, 'web');
+    expect(handlers.onDone).toHaveBeenCalledWith(message);
+    expect(handlers.onError).not.toHaveBeenCalled();
+    const [url, init] = transport.mock.calls[0] as [string, RequestInit];
+    expect(url).toContain('/v1/research/sessions/research-1/messages');
+    expect(JSON.parse(String(init.body))).toEqual({ content: 'question', mode: 'web' });
+  });
+
+  it('rejects a research stream that closes without done or error', async () => {
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('event: delta\ndata: {"text":"partial"}\n\n'));
+        controller.close();
+      },
+    });
+    configureApiTransport(vi.fn().mockResolvedValue(new Response(stream, {
+      status: 200, headers: { 'Content-Type': 'text/event-stream' },
+    })));
+    const handlers = {
+      onStart: vi.fn(), onDelta: vi.fn(), onSources: vi.fn(), onDone: vi.fn(), onError: vi.fn(),
+    };
+
+    await expect(api.sendResearchMessage('research-1', 'question', 'smart', handlers)).rejects.toMatchObject({
+      code: 'RESEARCH_STREAM_INTERRUPTED', retryable: true,
     });
     expect(handlers.onDelta).toHaveBeenCalledWith('partial');
   });
