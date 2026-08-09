@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from datetime import timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -8,7 +9,7 @@ from fastapi.testclient import TestClient
 from app import main
 from app.ai import LocalDemoAI
 from app.retrieval import HybridRetriever, chunk_markdown, rebuild_document_index
-from app.store import Store
+from app.store import Store, now_utc
 
 
 class HybridRetrievalTest(unittest.TestCase):
@@ -99,6 +100,16 @@ print('still fenced')
         self.assertEqual(result.results[0]["document_id"], document["id"])
         self.assertIsNotNone(result.fallback_reason)
 
+    def test_pending_public_index_is_discoverable_for_startup_recovery(self):
+        document = self.store.create_public_document(
+            self.user["id"], title="Recoverable", markdown="# Recoverable\n\nPending index",
+        )
+        pending = self.store.list_pending_index_documents(
+            older_than=now_utc() + timedelta(seconds=1), limit=10,
+        )
+        self.assertIn(document["id"], {item["document_id"] for item in pending})
+        self.assertEqual(document["index_status"], "pending")
+
 
 class SearchApiTest(unittest.TestCase):
     def setUp(self):
@@ -129,11 +140,12 @@ class SearchApiTest(unittest.TestCase):
         self.assertEqual(self.client.get("/v1/search", params={"q": "   "}).status_code, 422)
         self.assertEqual(self.client.get("/v1/search", params={"q": "Orion", "limit": 0}).status_code, 422)
         result = self.client.get("/v1/search", params={"q": "Orion port", "limit": 4}).json()
-        self.assertEqual(result["retrieval_mode"], "hybrid")
+        self.assertIn(result["retrieval_mode"], {"hybrid", "keyword"})
         self.assertEqual(result["items"][0]["document_id"], document["id"])
         first = self.client.post(f"/v1/documents/{document['id']}/reindex").json()
         second = self.client.post(f"/v1/documents/{document['id']}/reindex").json()
-        self.assertEqual(first["chunks"], second["chunks"])
+        self.assertEqual(first["status"], "queued")
+        self.assertEqual(second["status"], "queued")
 
         self.client.post("/v1/auth/logout")
         self.login("search-other@example.com")

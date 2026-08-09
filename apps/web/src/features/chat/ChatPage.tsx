@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { ApiError, api } from '../../lib/api';
+import { api } from '../../lib/api';
 import type { ChatMessage, ChatSession, ChatStreamHandlers, Memory } from '../../lib/types';
 import './chat.css';
 
@@ -10,7 +10,6 @@ type Props = {
   onOpenSession: (id: string) => void;
   onOpenDocument: (id: string, visibility: 'private' | 'public') => void;
   onOpenCapture: () => void;
-  onAuthError: () => void;
 };
 
 const GROUNDING_LABELS = {
@@ -30,7 +29,7 @@ function draftMessage(id: string, sessionId: string, role: 'user' | 'assistant',
   };
 }
 
-export function ChatPage({ sessionId, onOpenSession, onOpenDocument, onOpenCapture, onAuthError }: Props) {
+export function ChatPage({ sessionId, onOpenSession, onOpenDocument, onOpenCapture }: Props) {
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
@@ -44,10 +43,6 @@ export function ChatPage({ sessionId, onOpenSession, onOpenDocument, onOpenCaptu
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
   const fail = (cause: unknown, fallback: string) => {
-    if (cause instanceof ApiError && cause.status === 401) {
-      onAuthError();
-      return;
-    }
     setError(cause instanceof Error ? cause.message : fallback);
   };
 

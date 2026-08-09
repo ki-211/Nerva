@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ApiError, api } from '../../lib/api';
+import { api } from '../../lib/api';
 import type { Document } from '../../lib/types';
 import { MarkdownView } from './knowledgeViews';
 import './PublicKnowledgeSection.css';
@@ -9,10 +9,9 @@ const PAGE_SIZE = 8;
 
 type Props = {
   documentId: string | null;
-  onAuthError: () => void;
 };
 
-export function PublicKnowledgeSection({ documentId, onAuthError }: Props) {
+export function PublicKnowledgeSection({ documentId }: Props) {
   const navigate = useNavigate();
   const [documents, setDocuments] = useState<Document[]>([]);
   const [query, setQuery] = useState('');
@@ -34,11 +33,10 @@ export function PublicKnowledgeSection({ documentId, onAuthError }: Props) {
     api.publicDocuments()
       .then(setDocuments)
       .catch((cause) => {
-        if (cause instanceof ApiError && cause.status === 401) return onAuthError();
         setError(cause instanceof Error ? cause.message : '大众知识库加载失败');
       })
       .finally(() => setLoading(false));
-  }, [onAuthError]);
+  }, []);
 
   useEffect(() => {
     if (!selected) return;

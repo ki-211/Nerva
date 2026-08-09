@@ -1,57 +1,114 @@
 import type { AdminUser, ChatMessage, ChatSession, ChatStreamHandlers, ChangeSet, Document, DocumentVersion, KnowledgeEvent, KnowledgeOwnership, Memory, MemoryCreate, MemoryUpdate, SearchResponse, SourceProcessing, User } from './types';
+import { clientLogger } from './clientLogger';
+import {
+  actionForError, ApiError, categoryForStatus, fallbackMessage, signalSessionExpired,
+  signalOperationFailure,
+} from './errors';
+
+export { ApiError } from './errors';
 
 const BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
-const REQUEST_TIMEOUT_MS = 10_000;
+const CLIENT_TYPE = import.meta.env.VITE_CLIENT_TYPE || 'web-development';
+const CLIENT_VERSION = import.meta.env.VITE_APP_VERSION || '0.1.0';
+const REQUEST_TIMEOUT_MS = 15_000;
+const DOWNLOAD_TIMEOUT_MS = 120_000;
+const UPLOAD_TIMEOUT_MS = 300_000;
+const STREAM_CONNECT_TIMEOUT_MS = 30_000;
 
-export class ApiError extends Error {
-  constructor(
-    message: string,
-    public status: number,
-    public code?: string,
-    public sourceId?: string,
-    public retryable = false,
-    public currentVersion?: number,
-    public requiresReupload = false,
-  ) { super(message); }
+type ErrorPayload = {
+  code?: string; message?: string; retryable?: boolean; request_id?: string;
+  source_id?: string; current_version?: number; requires_reupload?: boolean;
+};
+
+function requestHeaders(headers?: HeadersInit): Headers {
+  const result = new Headers(headers);
+  result.set('X-Nerva-Client', CLIENT_TYPE);
+  result.set('X-Nerva-Version', CLIENT_VERSION);
+  return result;
+}
+
+function networkError(code: string, message: string, retryable = true): ApiError {
+  return new ApiError(message, 0, code, undefined, retryable, undefined, false, undefined, 'network', 'retry');
+}
+
+function logApiFailure(operation: string, error: ApiError): void {
+  clientLogger.warn('api_operation_failed', {
+    operation, errorCode: error.code, requestId: error.requestId,
+    status: error.status, category: error.category, action: error.action,
+  });
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  init?.signal?.addEventListener('abort', () => controller.abort(), { once: true });
+  const headers = requestHeaders(init?.headers);
+  headers.set('Content-Type', 'application/json');
   let response: Response;
   try {
     response = await fetch(`${BASE}${path}`, {
       ...init,
-      signal: init?.signal ?? controller.signal,
+      signal: controller.signal,
       credentials: 'include',
-      headers: { 'Content-Type': 'application/json', ...init?.headers },
+      headers,
     });
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') {
-      throw new ApiError('API 服务连接超时，请确认后端已启动', 0, 'API_TIMEOUT', undefined, true);
+      const mapped = networkError('API_TIMEOUT', '服务响应超时，请检查网络后重试');
+      logApiFailure(`${init?.method || 'GET'} ${path}`, mapped);
+      if ((init?.method || 'GET').toUpperCase() !== 'GET') signalOperationFailure(mapped);
+      throw mapped;
     }
-    throw new ApiError('无法连接 API 服务，请确认后端已启动', 0, 'API_UNAVAILABLE', undefined, true);
+    const mapped = networkError('API_UNAVAILABLE', '服务暂时不可用，请检查网络');
+    logApiFailure(`${init?.method || 'GET'} ${path}`, mapped);
+    if ((init?.method || 'GET').toUpperCase() !== 'GET') signalOperationFailure(mapped);
+    throw mapped;
   } finally {
     window.clearTimeout(timeout);
   }
   if (!response.ok) {
-    throw await responseError(response);
+    const error = await responseError(response);
+    logApiFailure(`${init?.method || 'GET'} ${path}`, error);
+    if (error.status === 401 && !path.includes('/auth/code-login') && !path.includes('/auth/admin-login')) {
+      signalSessionExpired();
+    }
+    const isLoginSubmission = path.includes('/auth/code-login') || path.includes('/auth/admin-login');
+    if ((init?.method || 'GET').toUpperCase() !== 'GET' && ![409, 422].includes(error.status)
+      && !(isLoginSubmission && [400, 401, 403, 429].includes(error.status))) {
+      signalOperationFailure(error);
+    }
+    throw error;
   }
   if (response.status === 204) return undefined as T;
-  return response.json() as Promise<T>;
+  try {
+    return await response.json() as T;
+  } catch (cause) {
+    const requestId = response.headers.get('X-Request-ID') || undefined;
+    const error = new ApiError(
+      '服务返回了无效响应，请稍后重试', response.status, 'API_INVALID_RESPONSE',
+      undefined, true, undefined, false, requestId, 'server', 'retry',
+    );
+    clientLogger.error('api_invalid_success_response', cause, {
+      operation: `${init?.method || 'GET'} ${path}`, errorCode: error.code, requestId,
+    });
+    throw error;
+  }
 }
 
 async function responseError(response: Response): Promise<ApiError> {
-  const body = await response.json().catch(() => ({}));
-  const detail = body.detail;
-  if (detail && typeof detail === 'object') {
-    return new ApiError(
-      detail.message || '请求失败', response.status, detail.code,
-      detail.source_id, Boolean(detail.retryable), detail.current_version,
-      Boolean(detail.requires_reupload),
-    );
-  }
-  return new ApiError(typeof detail === 'string' ? detail : '请求失败', response.status);
+  const requestId = response.headers.get('X-Request-ID') || undefined;
+  const body = await response.json().catch(() => null) as { error?: ErrorPayload; detail?: ErrorPayload | string } | null;
+  const legacy = body?.detail;
+  const payload: ErrorPayload = body?.error || (legacy && typeof legacy === 'object' ? legacy : {});
+  const retryable = Boolean(payload.retryable || response.status >= 500);
+  const message = payload.message || (typeof legacy === 'string' ? legacy : fallbackMessage(response.status));
+  const requiresReupload = Boolean(payload.requires_reupload);
+  return new ApiError(
+    message, response.status, payload.code || `HTTP_${response.status}`,
+    payload.source_id, retryable, payload.current_version, requiresReupload,
+    payload.request_id || requestId, categoryForStatus(response.status),
+    actionForError(response.status, retryable, requiresReupload),
+  );
 }
 
 function responseFilename(response: Response, fallback: string): string {
@@ -65,8 +122,32 @@ function responseFilename(response: Response, fallback: string): string {
 }
 
 async function download(path: string, fallbackFilename: string): Promise<void> {
-  const response = await fetch(`${BASE}${path}`, { credentials: 'include' });
-  if (!response.ok) throw await responseError(response);
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), DOWNLOAD_TIMEOUT_MS);
+  let response: Response;
+  try {
+    response = await fetch(`${BASE}${path}`, {
+      credentials: 'include', signal: controller.signal, headers: requestHeaders(),
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      const mapped = networkError('DOWNLOAD_TIMEOUT', '下载超时，请检查网络后重试');
+      logApiFailure(`DOWNLOAD ${path}`, mapped);
+      throw mapped;
+    }
+    const mapped = networkError('DOWNLOAD_UNAVAILABLE', '下载服务暂时不可用，请检查网络');
+    logApiFailure(`DOWNLOAD ${path}`, mapped);
+    throw mapped;
+  } finally {
+    window.clearTimeout(timeout);
+  }
+  if (!response.ok) {
+    const error = await responseError(response);
+    logApiFailure(`DOWNLOAD ${path}`, error);
+    if (error.status === 401) signalSessionExpired();
+    signalOperationFailure(error);
+    throw error;
+  }
   const objectUrl = URL.createObjectURL(await response.blob());
   const anchor = document.createElement('a');
   anchor.href = objectUrl;
@@ -80,15 +161,38 @@ async function download(path: string, fallbackFilename: string): Promise<void> {
 async function streamChat(
   path: string, body: object | undefined, handlers: ChatStreamHandlers, signal?: AbortSignal,
 ): Promise<void> {
-  const response = await fetch(`${BASE}${path}`, {
-    method: 'POST', credentials: 'include', signal,
-    headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  if (!response.ok) throw await responseError(response);
-  if (!response.body) throw new ApiError('浏览器不支持流式响应', 0, 'CHAT_STREAM_UNAVAILABLE');
+  const controller = new AbortController();
+  signal?.addEventListener('abort', () => controller.abort(), { once: true });
+  const connectTimeout = window.setTimeout(() => controller.abort(), STREAM_CONNECT_TIMEOUT_MS);
+  let response: Response;
+  try {
+    response = await fetch(`${BASE}${path}`, {
+      method: 'POST', credentials: 'include', signal: controller.signal,
+      headers: requestHeaders({ 'Content-Type': 'application/json', Accept: 'text/event-stream' }),
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      const mapped = networkError('CHAT_STREAM_CONNECT_TIMEOUT', '连接对话服务超时，请重试');
+      logApiFailure(`SSE ${path}`, mapped);
+      throw mapped;
+    }
+    const mapped = networkError('CHAT_STREAM_UNAVAILABLE', '对话服务暂时不可用，请检查网络');
+    logApiFailure(`SSE ${path}`, mapped);
+    throw mapped;
+  } finally {
+    window.clearTimeout(connectTimeout);
+  }
+  if (!response.ok) {
+    const error = await responseError(response);
+    logApiFailure(`SSE ${path}`, error);
+    if (error.status === 401) signalSessionExpired();
+    throw error;
+  }
+  if (!response.body) throw networkError('CHAT_STREAM_UNAVAILABLE', '当前客户端无法接收流式响应');
   if (!response.headers.get('Content-Type')?.includes('text/event-stream')) {
-    throw new ApiError('对话服务返回了非流式响应', 0, 'CHAT_STREAM_INVALID_CONTENT_TYPE', undefined, true);
+    throw networkError('CHAT_STREAM_INVALID_CONTENT_TYPE', '对话服务返回了无效响应');
   }
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -107,7 +211,7 @@ async function streamChat(
     try {
       payload = JSON.parse(data);
     } catch {
-      throw new ApiError('对话流数据格式无效', 0, 'CHAT_STREAM_INVALID_EVENT', undefined, true);
+      throw networkError('CHAT_STREAM_INVALID_EVENT', '对话流数据格式无效');
     }
     if (event === 'start') handlers.onStart(payload);
     if (event === 'delta') handlers.onDelta(payload.text || '');
@@ -118,7 +222,17 @@ async function streamChat(
     }
     if (event === 'error') {
       terminalEventReceived = true;
-      handlers.onError(payload);
+      const streamError = new ApiError(
+        payload.message || '对话生成失败', 0, payload.code || 'CHAT_STREAM_ERROR',
+        undefined, Boolean(payload.retryable), undefined, false, payload.request_id,
+        'server', payload.retryable ? 'retry' : 'none',
+      );
+      logApiFailure(`SSE ${path}`, streamError);
+      handlers.onError({
+        ...payload,
+        request_id: streamError.requestId,
+        message: streamError.message,
+      });
     }
   };
 
@@ -132,7 +246,9 @@ async function streamChat(
   }
   if (buffer.trim()) handleBlock(buffer);
   if (!terminalEventReceived) {
-    throw new ApiError('对话连接提前中断，请重试', 0, 'CHAT_STREAM_INTERRUPTED', undefined, true);
+    const error = networkError('CHAT_STREAM_INTERRUPTED', '对话连接提前中断，请重试');
+    logApiFailure(`SSE ${path}`, error);
+    throw error;
   }
 }
 
@@ -148,6 +264,9 @@ function uploadImages(
     const xhr = new XMLHttpRequest();
     xhr.open('POST', `${BASE}/v1/image-ingestions`);
     xhr.withCredentials = true;
+    xhr.timeout = UPLOAD_TIMEOUT_MS;
+    xhr.setRequestHeader('X-Nerva-Client', CLIENT_TYPE);
+    xhr.setRequestHeader('X-Nerva-Version', CLIENT_VERSION);
     xhr.upload.onprogress = (event) => {
       if (event.lengthComputable) onProgress(Math.round((event.loaded / event.total) * 100));
     };
@@ -157,14 +276,34 @@ function uploadImages(
         resolve(body as SourceProcessing);
         return;
       }
-      const detail = body.detail;
-      reject(new ApiError(
-        typeof detail === 'object' ? detail.message || '图片上传失败' : detail || '图片上传失败',
-        xhr.status, detail?.code, detail?.source_id, Boolean(detail?.retryable),
-        undefined, Boolean(detail?.requires_reupload),
-      ));
+      const detail: ErrorPayload | string = body.error || body.detail || {};
+      const payload: ErrorPayload = typeof detail === 'object' ? detail : {};
+      const retryable = Boolean(payload.retryable || xhr.status >= 500);
+      const requiresReupload = Boolean(payload.requires_reupload);
+      const error = new ApiError(
+        payload.message || (typeof detail === 'string' ? detail : fallbackMessage(xhr.status)),
+        xhr.status, payload.code || `HTTP_${xhr.status}`,
+        payload.source_id, retryable, payload.current_version, requiresReupload,
+        payload.request_id || xhr.getResponseHeader('X-Request-ID') || undefined,
+        categoryForStatus(xhr.status), actionForError(xhr.status, retryable, requiresReupload),
+      );
+      if (error.status === 401) signalSessionExpired();
+      logApiFailure('UPLOAD /v1/image-ingestions', error);
+      signalOperationFailure(error);
+      reject(error);
     };
-    xhr.onerror = () => reject(new ApiError('无法连接图片上传服务', 0));
+    xhr.onerror = () => {
+      const error = networkError('UPLOAD_UNAVAILABLE', '图片上传服务暂时不可用，请检查网络');
+      logApiFailure('UPLOAD /v1/image-ingestions', error);
+      signalOperationFailure(error);
+      reject(error);
+    };
+    xhr.ontimeout = () => {
+      const error = networkError('UPLOAD_TIMEOUT', '图片上传超时，请检查网络后重试');
+      logApiFailure('UPLOAD /v1/image-ingestions', error);
+      signalOperationFailure(error);
+      reject(error);
+    };
     xhr.send(form);
   });
 }
@@ -207,7 +346,6 @@ export const api = {
   publicDocument: (id: string) => request<Document>(`/v1/public-documents/${id}`),
   adminUsers: () => request<AdminUser[]>('/v1/admin/users'),
   knowledgeOwnership: () => request<KnowledgeOwnership[]>('/v1/admin/knowledge-ownership'),
-  adminDocument: (id: string) => request<Document>(`/v1/admin/documents/${id}`),
   createPublicDocument: (title: string, markdown: string) => request<Document>('/v1/admin/public-documents', {
     method: 'POST', body: JSON.stringify({ title, markdown }),
   }),

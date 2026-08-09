@@ -63,12 +63,18 @@ class AdminPublicApiTest(unittest.TestCase):
 
     def test_public_documents_are_readable_but_admin_only_writable(self):
         self.assertEqual(self.admin_login().status_code, 200)
-        created = self.client.post("/v1/admin/public-documents", json={
-            "title": "Shared indexing", "markdown": "# Shared indexing\n\nB-tree guidance",
-        })
+        with patch("app.main.submit_index_rebuild") as submit_index:
+            created = self.client.post("/v1/admin/public-documents", json={
+                "title": "Shared indexing", "markdown": "# Shared indexing\n\nB-tree guidance",
+            })
         self.assertEqual(created.status_code, 201)
         document = created.json()
         self.assertEqual(document["visibility"], "public")
+        self.assertEqual(document["index_status"], "pending")
+        submit_index.assert_called_once()
+        self.assertEqual(submit_index.call_args.kwargs["trigger"], "public_document_create")
+        audit = main.store.list_audit_events(action="admin.public_document.create")
+        self.assertEqual(audit[-1]["target_id"], document["id"])
 
         self.client.post("/v1/auth/logout")
         self.assertEqual(self.code_login("reader@example.com").status_code, 200)
@@ -87,6 +93,7 @@ class AdminPublicApiTest(unittest.TestCase):
         self.assertEqual(included.status_code, 200)
         self.assertTrue(included.json()["items"])
         self.assertEqual(included.json()["items"][0]["visibility"], "public")
+        self.assertEqual(included.json()["retrieval_mode"], "keyword")
         self.assertEqual(excluded.json()["items"], [])
 
     def test_password_sync_changes_hash_and_revokes_sessions(self):
@@ -103,7 +110,7 @@ class AdminPublicApiTest(unittest.TestCase):
         self.assertEqual(self.admin_login().status_code, 401)
         self.assertEqual(self.admin_login(changed_password).status_code, 200)
 
-    def test_admin_can_read_private_document_detail_but_regular_user_cannot(self):
+    def test_neither_admin_nor_regular_user_can_read_private_document_through_admin_api(self):
         self.assertEqual(self.code_login("private-owner@example.com").status_code, 200)
         draft_response = self.client.post("/v1/ingestions", json={
             "kind": "text", "title": "Private operations", "content": "Only the owner and administrator may read this.",
@@ -123,10 +130,9 @@ class AdminPublicApiTest(unittest.TestCase):
         self.client.post("/v1/auth/logout")
         self.assertEqual(self.admin_login().status_code, 200)
         detail = self.client.get(f"/v1/admin/documents/{private_document['id']}")
-        self.assertEqual(detail.status_code, 200)
-        self.assertEqual(detail.json()["id"], private_document["id"])
-        self.assertEqual(detail.json()["visibility"], "private")
-        self.assertTrue(detail.json()["markdown"])
+        self.assertEqual(detail.status_code, 403)
+        self.assertEqual(detail.json()["error"]["code"], "ADMIN_PRIVATE_CONTENT_FORBIDDEN")
+        self.assertNotIn("markdown", detail.json())
 
 
 if __name__ == "__main__":

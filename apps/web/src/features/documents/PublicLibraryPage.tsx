@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { ApiError, api } from '../../lib/api';
+import { api } from '../../lib/api';
 import type { Document, User } from '../../lib/types';
 import { MarkdownView } from './knowledgeViews';
 import '../../styles/knowledge.css';
@@ -9,10 +9,9 @@ type Props = {
   documentId: string | null;
   onOpen: (id: string) => void;
   onCountChange?: (count: number) => void;
-  onAuthError: () => void;
 };
 
-export function PublicLibraryPage({ user, documentId, onOpen, onCountChange, onAuthError }: Props) {
+export function PublicLibraryPage({ user, documentId, onOpen, onCountChange }: Props) {
   const [documents, setDocuments] = useState<Document[]>([]);
   const [query, setQuery] = useState('');
   const [editing, setEditing] = useState(false);
@@ -31,7 +30,6 @@ export function PublicLibraryPage({ user, documentId, onOpen, onCountChange, onA
   }, [documents, query]);
 
   const fail = (cause: unknown, fallback: string) => {
-    if (cause instanceof ApiError && cause.status === 401) return onAuthError();
     setError(cause instanceof Error ? cause.message : fallback);
   };
   const refresh = async () => {
@@ -83,7 +81,7 @@ export function PublicLibraryPage({ user, documentId, onOpen, onCountChange, onA
       <label className="library-search"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索公共文档" /></label>
       <div className="document-count">{filtered.length} 篇公开文档</div>
       <div className="document-items">{filtered.map((item) => <button key={item.id} className={item.id === selected?.id ? 'active' : ''} onClick={() => onOpen(item.id)}>
-        <b>{item.title}</b><small><span>v{item.version}</span>{new Date(item.updated_at).toLocaleDateString('zh-CN')}</small>
+        <b>{item.title}</b><small><span>v{item.version}</span>{user.role === 'admin' && <span>{item.index_status === 'ready' ? '索引完成' : item.index_status === 'failed' ? '索引失败·关键词可用' : '索引处理中'}</span>}{new Date(item.updated_at).toLocaleDateString('zh-CN')}</small>
       </button>)}</div>
     </aside>
     {editing ? <article className="document-reader"><div className="reader-main">

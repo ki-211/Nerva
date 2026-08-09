@@ -11,10 +11,9 @@ import './CaptureView.css';
 type Props = {
   publicDocumentId: string | null;
   onRefresh: (docs: Document[], events: KnowledgeEvent[]) => void;
-  onAuthError: () => void;
 };
 
-export function CaptureView({ publicDocumentId, onRefresh, onAuthError }: Props) {
+export function CaptureView({ publicDocumentId, onRefresh }: Props) {
   const navigate = useNavigate();
   const [title, setTitle] = useState('');
   const [content, setContent] = useState('');
@@ -30,16 +29,12 @@ export function CaptureView({ publicDocumentId, onRefresh, onAuthError }: Props)
 
   const handleError = useCallback(
     (e: unknown, fallback: string) => {
-      if (e instanceof ApiError && e.status === 401) {
-        onAuthError();
-        return;
-      }
       if (e instanceof ApiError && e.sourceId && e.retryable) {
         setFailedSourceId(e.sourceId);
       }
       setError(e instanceof Error ? e.message : fallback);
     },
-    [onAuthError]
+    []
   );
 
   const waitForSource = async (initial: SourceProcessing): Promise<ChangeSet> => {
@@ -58,10 +53,11 @@ export function CaptureView({ publicDocumentId, onRefresh, onAuthError }: Props)
         current.source_id,
         current.error?.retryable,
         undefined,
-        current.error?.requires_reupload
+        current.error?.requires_reupload,
+        current.source_id,
       );
     }
-    if (!current.change_set_id) throw new ApiError('处理完成但没有生成草案', 500);
+    if (!current.change_set_id) throw new ApiError('处理完成但没有生成草案', 500, 'CHANGE_SET_MISSING');
     return api.changeSet(current.change_set_id);
   };
 
@@ -228,7 +224,7 @@ export function CaptureView({ publicDocumentId, onRefresh, onAuthError }: Props)
           </div>
         )}
       </div>
-      <PublicKnowledgeSection documentId={publicDocumentId} onAuthError={onAuthError} />
+      <PublicKnowledgeSection documentId={publicDocumentId} />
     </section>
   );
 }

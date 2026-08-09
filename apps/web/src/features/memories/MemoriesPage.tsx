@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { ApiError, api } from '../../lib/api';
+import { api } from '../../lib/api';
 import type { Memory, MemoryKind, MemoryStatus } from '../../lib/types';
 import './memories.css';
 
@@ -11,11 +11,7 @@ const KIND_LABELS: Record<MemoryKind, string> = {
   merge_preference: '合并策略',
 };
 
-type Props = {
-  onAuthError: () => void;
-};
-
-export function MemoriesPage({ onAuthError }: Props) {
+export function MemoriesPage() {
   const [memories, setMemories] = useState<Memory[]>([]);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState<string | null>(null);
@@ -27,10 +23,6 @@ export function MemoriesPage({ onAuthError }: Props) {
   const [error, setError] = useState('');
 
   const handleError = (cause: unknown, fallback: string) => {
-    if (cause instanceof ApiError && cause.status === 401) {
-      onAuthError();
-      return;
-    }
     setError(cause instanceof Error ? cause.message : fallback);
   };
 
@@ -39,7 +31,7 @@ export function MemoriesPage({ onAuthError }: Props) {
       .then(setMemories)
       .catch((cause) => handleError(cause, '偏好设置加载失败'))
       .finally(() => setLoading(false));
-  }, [onAuthError]);
+  }, []);
 
   const handleCreate = async () => {
     if (!newContent.trim()) return;

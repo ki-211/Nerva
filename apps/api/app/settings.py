@@ -1,4 +1,5 @@
 import os
+import ipaddress
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -28,6 +29,18 @@ spring_mail = load_spring_mail_config()
 
 @dataclass(frozen=True)
 class Settings:
+    environment: str = os.getenv("NERVA_ENV", "development").strip().lower()
+    service_version: str = os.getenv("NERVA_VERSION", "0.1.0").strip()
+    sentry_dsn: str | None = os.getenv("NERVA_SENTRY_DSN") or None
+    sentry_traces_sample_rate: float = float(os.getenv("NERVA_SENTRY_TRACES_SAMPLE_RATE", "0.1"))
+    metrics_token: str | None = os.getenv("NERVA_METRICS_TOKEN") or None
+    metrics_allowed_networks: tuple[str, ...] = tuple(
+        value.strip() for value in os.getenv(
+            "NERVA_METRICS_ALLOWED_NETWORKS", "127.0.0.1/32,::1/128",
+        ).split(",") if value.strip()
+    )
+    log_format: str = os.getenv("NERVA_LOG_FORMAT", "text").strip().lower()
+    log_dir: str | None = os.getenv("NERVA_LOG_DIR") or None
     ai_provider: str = os.getenv("NERVA_AI_PROVIDER", "local")
     dashscope_api_key: str | None = os.getenv("DASHSCOPE_API_KEY")
     dashscope_base_url: str = os.getenv(
@@ -73,6 +86,11 @@ class Settings:
     admin_username: str = os.getenv("NERVA_ADMIN_USERNAME", "admin")
     admin_password: str = os.getenv("NERVA_ADMIN_PASSWORD", "admin")
     admin_email: str = os.getenv("NERVA_ADMIN_EMAIL", "admin@nerva.app")
+    admin_login_max_failures: int = int(os.getenv("NERVA_ADMIN_LOGIN_MAX_FAILURES", "5"))
+    admin_login_window_minutes: int = int(os.getenv("NERVA_ADMIN_LOGIN_WINDOW_MINUTES", "10"))
+    index_worker_count: int = int(os.getenv("NERVA_INDEX_WORKERS", "1"))
+    index_recovery_age_minutes: int = int(os.getenv("NERVA_INDEX_RECOVERY_AGE_MINUTES", "5"))
+    index_recovery_limit: int = int(os.getenv("NERVA_INDEX_RECOVERY_LIMIT", "100"))
     smtp_host: str | None = os.getenv("SMTP_HOST") or spring_mail.get("host") or None
     smtp_port: int = int(os.getenv("SMTP_PORT") or spring_mail.get("port") or 465)
     smtp_username: str | None = os.getenv("SMTP_USERNAME") or str(spring_mail.get("username") or "") or None
@@ -81,6 +99,17 @@ class Settings:
     smtp_use_ssl: bool = os.getenv("SMTP_USE_SSL", "true").lower() == "true"
 
     def validate(self) -> None:
+        if self.environment not in {"development", "test", "production"}:
+            raise RuntimeError("NERVA_ENV must be development, test, or production")
+        if self.log_format not in {"text", "json"}:
+            raise RuntimeError("NERVA_LOG_FORMAT must be text or json")
+        if not 0 <= self.sentry_traces_sample_rate <= 1:
+            raise RuntimeError("NERVA_SENTRY_TRACES_SAMPLE_RATE must be between 0 and 1")
+        try:
+            for network in self.metrics_allowed_networks:
+                ipaddress.ip_network(network, strict=False)
+        except ValueError as exc:
+            raise RuntimeError("NERVA_METRICS_ALLOWED_NETWORKS contains an invalid CIDR") from exc
         if self.ai_provider not in {"local", "bailian"}:
             raise RuntimeError(f"Unsupported NERVA_AI_PROVIDER: {self.ai_provider}")
         if self.ai_provider == "bailian":
@@ -104,6 +133,31 @@ class Settings:
             raise RuntimeError("chunk target/overlap configuration is invalid")
         if self.max_indexed_chunks_per_user < 1:
             raise RuntimeError("NERVA_MAX_INDEXED_CHUNKS_PER_USER must be positive")
+        if self.admin_login_max_failures < 1 or self.admin_login_window_minutes < 1:
+            raise RuntimeError("administrator login limits must be positive")
+        if self.index_worker_count != 1:
+            raise RuntimeError("NERVA_INDEX_WORKERS must remain 1 until a durable task queue is available")
+        if self.index_recovery_age_minutes < 1 or self.index_recovery_limit < 1:
+            raise RuntimeError("index recovery settings must be positive")
+        if self.environment == "production":
+            if self.verification_code_secret == "nerva-local-development-only" or len(self.verification_code_secret) < 32:
+                raise RuntimeError("NERVA_CODE_SECRET must be a unique value of at least 32 characters")
+            if self.admin_password == "admin" or len(self.admin_password) < 16:
+                raise RuntimeError("NERVA_ADMIN_PASSWORD must be a non-default value of at least 16 characters")
+            if not self.session_cookie_secure:
+                raise RuntimeError("NERVA_COOKIE_SECURE must be true in production")
+            if self.log_format != "json":
+                raise RuntimeError("NERVA_LOG_FORMAT must be json in production")
+            if not self.metrics_token or len(self.metrics_token) < 24:
+                raise RuntimeError("NERVA_METRICS_TOKEN must contain at least 24 characters in production")
+            if not self.metrics_allowed_networks:
+                raise RuntimeError("NERVA_METRICS_ALLOWED_NETWORKS is required in production")
+            if not self.sentry_dsn:
+                raise RuntimeError("NERVA_SENTRY_DSN is required in production")
+            if not self.smtp_host or not self.smtp_username or not self.smtp_password:
+                raise RuntimeError("SMTP_HOST, SMTP_USERNAME and SMTP_PASSWORD are required in production")
+            if not self.cors_origins or "*" in self.cors_origins:
+                raise RuntimeError("NERVA_CORS_ORIGINS must explicitly list trusted desktop origins")
 
     def sqlalchemy_url(self) -> str | URL:
         if self.database_url:

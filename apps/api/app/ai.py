@@ -17,6 +17,7 @@ from .prompts import (
     EXTRACT_MEMORY_PROMPT, MEMORY_PROMPT_VERSION,
 )
 from .settings import settings
+from .monitoring import metrics
 
 
 logger = logging.getLogger("nerva.ai")
@@ -115,7 +116,8 @@ class AIProviderError(RuntimeError):
         self.status_code = status_code
         self.upstream_status = upstream_status
         self.upstream_code = upstream_code
-        self.upstream_message = upstream_message
+        # Deliberately discard provider prose: it may echo prompts or user content.
+        self.upstream_message = None
         self.request_id = request_id
 
 
@@ -128,7 +130,6 @@ def _safe_upstream_value(value: object, max_length: int) -> str | None:
 
 def _upstream_error_details(response: httpx.Response) -> tuple[str | None, str | None, str | None]:
     upstream_code = None
-    upstream_message = None
     request_id = response.headers.get("x-request-id") or response.headers.get("request-id")
     try:
         payload = response.json()
@@ -140,14 +141,12 @@ def _upstream_error_details(response: httpx.Response) -> tuple[str | None, str |
         error = payload.get("error")
         if isinstance(error, dict):
             upstream_code = error.get("code") or payload.get("code")
-            upstream_message = error.get("message") or payload.get("message")
         else:
             upstream_code = payload.get("code")
-            upstream_message = payload.get("message") or error
 
     return (
         _safe_upstream_value(upstream_code, 128),
-        _safe_upstream_value(upstream_message, 500),
+        None,
         _safe_upstream_value(request_id, 128),
     )
 
@@ -577,10 +576,14 @@ class BailianAI:
         except (ValueError, KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
             raise AIProviderError("AI_INVALID_RESPONSE", "模型返回格式无效", retryable=True) from exc
         usage = payload.get("usage", {})
-        logger.info(
-            "ai_call provider=bailian model=%s prompt=%s elapsed_ms=%s prompt_tokens=%s completion_tokens=%s",
-            self.model, prompt_version, elapsed_ms, usage.get("prompt_tokens"), usage.get("completion_tokens"),
-        )
+        metrics.increment("nerva_model_calls_total", operation="ai", status="success")
+        metrics.observe("nerva_model_call_duration", elapsed_ms / 1000, operation="ai")
+        logger.info("ai_call", extra={
+            "event": "ai_call", "provider": self.provider, "model": self.model,
+            "prompt_version": prompt_version, "elapsed_ms": elapsed_ms,
+            "prompt_tokens": usage.get("prompt_tokens"),
+            "completion_tokens": usage.get("completion_tokens"),
+        })
         return parsed
 
     def extract_inputs(
@@ -684,10 +687,10 @@ class BailianAI:
         started = time.perf_counter()
         emitted = False
         usage = None
-        logger.info(
-            "ai_stream_started provider=%s model=%s prompt=%s history_messages=%s sources=%s",
-            self.provider, self.model, CHAT_PROMPT_VERSION, len(history), len(sources),
-        )
+        logger.info("ai_stream_started", extra={
+            "event": "ai_stream_started", "provider": self.provider, "model": self.model,
+            "prompt_version": CHAT_PROMPT_VERSION,
+        })
         try:
             with self.client.stream("POST", f"{self.base_url}/chat/completions", json={
                 "model": self.model,
@@ -737,12 +740,17 @@ class BailianAI:
             raise AIProviderError("AI_UNAVAILABLE", "无法连接模型服务", retryable=True, status_code=503) from exc
         if not emitted:
             raise AIProviderError("AI_INVALID_RESPONSE", "模型没有返回可用内容", retryable=True)
-        logger.info(
-            "ai_stream provider=%s model=%s prompt=%s elapsed_ms=%s prompt_tokens=%s completion_tokens=%s",
-            self.provider, self.model, CHAT_PROMPT_VERSION,
-            int((time.perf_counter() - started) * 1000),
-            (usage or {}).get("prompt_tokens"), (usage or {}).get("completion_tokens"),
+        metrics.increment("nerva_model_calls_total", operation="ai", status="success")
+        metrics.observe(
+            "nerva_model_call_duration", time.perf_counter() - started, operation="ai",
         )
+        logger.info("ai_stream_completed", extra={
+            "event": "ai_stream_completed", "provider": self.provider, "model": self.model,
+            "prompt_version": CHAT_PROMPT_VERSION,
+            "elapsed_ms": int((time.perf_counter() - started) * 1000),
+            "prompt_tokens": (usage or {}).get("prompt_tokens"),
+            "completion_tokens": (usage or {}).get("completion_tokens"),
+        })
 
 
 class LocalDemoOCR:
@@ -815,12 +823,16 @@ class BailianOCR:
             raise AIProviderError("OCR_INVALID_RESPONSE", "图片识别结果为空或格式无效，请重新上传", retryable=False) from exc
         usage = payload.get("usage", {})
         prompt_details = usage.get("prompt_tokens_details") or {}
-        logger.info(
-            "ocr_call provider=bailian model=%s prompt=%s source_id=%s sequence=%s elapsed_ms=%s "
-            "prompt_tokens=%s completion_tokens=%s image_tokens=%s",
-            self.model, OCR_PROMPT_VERSION, source_id, sequence, elapsed_ms,
-            usage.get("prompt_tokens"), usage.get("completion_tokens"), prompt_details.get("image_tokens"),
-        )
+        metrics.increment("nerva_model_calls_total", operation="ocr", status="success")
+        metrics.observe("nerva_model_call_duration", elapsed_ms / 1000, operation="ocr")
+        logger.info("ocr_call", extra={
+            "event": "ocr_call", "provider": self.provider, "model": self.model,
+            "prompt_version": OCR_PROMPT_VERSION, "elapsed_ms": elapsed_ms,
+            "source_id": source_id,
+            "prompt_tokens": usage.get("prompt_tokens"),
+            "completion_tokens": usage.get("completion_tokens"),
+            "image_tokens": prompt_details.get("image_tokens"),
+        })
         return OCRResult(
             text=content,
             prompt_tokens=usage.get("prompt_tokens"),

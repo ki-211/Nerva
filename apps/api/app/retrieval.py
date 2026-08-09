@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import re
+import time
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 from .ai import AIProviderError, _keywords
 from .settings import settings
+from .monitoring import metrics
+
+
+logger = logging.getLogger("nerva.retrieval")
 
 
 class EmbeddingProvider(Protocol):
@@ -144,11 +150,14 @@ class HybridRetriever:
     def retrieve(self, user_id: str, query: str, recent_messages: list[str] | None = None,
                  *, candidate_count: int = 20, final_count: int = 8,
                  include_public: bool = False) -> RetrievalResult:
+        started = time.perf_counter()
         query = "\n".join([*(recent_messages or [])[-4:], query]).strip()
         if not query:
+            metrics.increment("nerva_retrieval_total", retrieval_mode="empty", fallback="none")
             return RetrievalResult([], "empty")
         chunks = self.store.list_search_chunks(user_id, include_public=include_public)
         if not chunks:
+            metrics.increment("nerva_retrieval_total", retrieval_mode="empty", fallback="none")
             return RetrievalResult([], "empty")
         terms = _keywords(query)
         keyword_ranked = []
@@ -161,8 +170,10 @@ class HybridRetriever:
         keyword_ids = [item["id"] for _, item in keyword_ranked]
         vector_ids: list[str] = []
         fallback_reason = None
+        embedding_started = time.perf_counter()
         try:
             query_vector = self.provider.embed([query])[0]
+            metrics.increment("nerva_model_calls_total", operation="embedding", status="success")
             if len(query_vector) != 1024:
                 raise ValueError("embedding query vector must have 1024 dimensions")
             ready = [
@@ -174,7 +185,14 @@ class HybridRetriever:
             scored.sort(key=lambda pair: (-pair[0], pair[1]["id"]))
             vector_ids = [item["id"] for _, item in scored[:candidate_count]]
         except Exception as exc:  # embedding is explicitly best-effort
+            metrics.increment("nerva_model_calls_total", operation="embedding", status="failed")
             fallback_reason = getattr(exc, "code", "EMBEDDING_UNAVAILABLE")
+            logger.warning(
+                "retrieval_embedding_fallback",
+                extra={"event": "retrieval_embedding_fallback", "error_code": fallback_reason},
+            )
+        finally:
+            metrics.observe("nerva_model_call_duration", time.perf_counter() - embedding_started, operation="embedding")
 
         by_id = {item["id"]: item for item in chunks}
         scores: dict[str, float] = {}
@@ -184,18 +202,38 @@ class HybridRetriever:
             scores[item_id] = scores.get(item_id, 0.0) + 1 / (60 + rank)
         fused_ids = sorted(scores, key=lambda item_id: (-scores[item_id], item_id))[:candidate_count]
         if not fused_ids:
-            return RetrievalResult([], "keyword" if fallback_reason else "empty", fallback_reason)
+            mode = "keyword" if fallback_reason else "empty"
+            metrics.increment("nerva_retrieval_total", retrieval_mode=mode, fallback=fallback_reason or "none")
+            logger.info("retrieval_completed", extra={
+                "event": "retrieval_completed", "retrieval_mode": mode,
+                "fallback_reason": fallback_reason, "candidate_count": 0,
+                "keyword_candidate_count": len(keyword_ids), "vector_candidate_count": len(vector_ids),
+                "rerank_elapsed_ms": 0, "elapsed_ms": int((time.perf_counter() - started) * 1000),
+            })
+            return RetrievalResult([], mode, fallback_reason)
         candidates = [{**by_id[item_id], "rrf_score": scores[item_id]} for item_id in fused_ids]
         mode = "hybrid" if vector_ids else "keyword"
+        rerank_started = time.perf_counter()
+        rerank_elapsed_ms = 0
         try:
             reranked = self.provider.rerank(query, candidates)
             candidate_ids = [item["id"] for item in candidates]
             reranked_ids = [item.get("id") for item in reranked]
             if len(reranked_ids) != len(candidate_ids) or set(reranked_ids) != set(candidate_ids):
                 raise ValueError("rerank returned invalid candidate ids")
+            metrics.increment("nerva_model_calls_total", operation="rerank", status="success")
             candidates = sorted(reranked, key=lambda item: (-float(item.get("rerank_score", 0)), -item["rrf_score"], item["id"]))
         except Exception as exc:
+            metrics.increment("nerva_model_calls_total", operation="rerank", status="failed")
             fallback_reason = fallback_reason or getattr(exc, "code", "RERANK_UNAVAILABLE")
+            logger.warning(
+                "retrieval_rerank_fallback",
+                extra={"event": "retrieval_rerank_fallback", "error_code": getattr(exc, "code", "RERANK_UNAVAILABLE")},
+            )
+        finally:
+            rerank_seconds = time.perf_counter() - rerank_started
+            rerank_elapsed_ms = int(rerank_seconds * 1000)
+            metrics.observe("nerva_model_call_duration", rerank_seconds, operation="rerank")
         selected: list[dict] = []
         counts: dict[str, int] = {}
         for item in candidates:
@@ -206,10 +244,28 @@ class HybridRetriever:
             selected.append(item)
             if len(selected) >= final_count:
                 break
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        metrics.increment("nerva_retrieval_total", retrieval_mode=mode, fallback=fallback_reason or "none")
+        logger.info(
+            "retrieval_completed",
+            extra={
+                "event": "retrieval_completed", "retrieval_mode": mode,
+                "fallback_reason": fallback_reason, "candidate_count": len(candidates),
+                "keyword_candidate_count": len(keyword_ids),
+                "vector_candidate_count": len(vector_ids),
+                "rerank_elapsed_ms": rerank_elapsed_ms,
+                "elapsed_ms": elapsed_ms,
+            },
+        )
         return RetrievalResult(selected, mode, fallback_reason)
 
 
 def rebuild_document_index(store, user_id: str, document_id: str, provider: EmbeddingProvider) -> list[dict] | None:
+    started = time.perf_counter()
+    logger.info("document_index_started", extra={
+        "event": "document_index_started", "document_id": document_id,
+        "model": getattr(provider, "embedding_model", getattr(provider, "model", "unknown")),
+    })
     document = store.get_document(user_id, document_id)
     if not document:
         return None
@@ -218,15 +274,56 @@ def rebuild_document_index(store, user_id: str, document_id: str, provider: Embe
     current_count = len(store.list_search_chunks(user_id)) - existing_count
     if current_count + len(chunks) > settings.max_indexed_chunks_per_user:
         payload = [{"content": item, "embedding_status": "failed"} for item in chunks]
-        return store.replace_document_chunks(user_id, document_id, document["version"], payload)
+        result = store.replace_document_chunks(user_id, document_id, document["version"], payload)
+        metrics.increment("nerva_document_index_total", status="failed", error_code="INDEX_CHUNK_LIMIT")
+        logger.warning(
+            "document_index_failed",
+            extra={
+                "event": "document_index_failed", "error_code": "INDEX_CHUNK_LIMIT",
+                "chunk_count": len(chunks), "document_id": document_id,
+            },
+        )
+        return result
+    failure_code: str | None = None
     try:
         vectors = []
         for start in range(0, len(chunks), settings.embedding_batch_size):
-            vectors.extend(provider.embed(chunks[start:start + settings.embedding_batch_size]))
+            call_started = time.perf_counter()
+            try:
+                vectors.extend(provider.embed(chunks[start:start + settings.embedding_batch_size]))
+                metrics.increment("nerva_model_calls_total", operation="embedding", status="success")
+            except Exception:
+                metrics.increment("nerva_model_calls_total", operation="embedding", status="failed")
+                raise
+            finally:
+                metrics.observe("nerva_model_call_duration", time.perf_counter() - call_started, operation="embedding")
         if len(vectors) != len(chunks) or any(len(vector) != 1024 for vector in vectors):
             raise ValueError("invalid embedding dimensions")
         payload = [{"content": item, "embedding": vector, "embedding_status": "ready"} for item, vector in zip(chunks, vectors)]
-    except Exception:
+    except Exception as exc:
         payload = [{"content": item, "embedding_status": "failed"} for item in chunks]
-    return store.replace_document_chunks(user_id, document_id, document["version"], payload,
-                                         embedding_model=getattr(provider, "model", None))
+        error_code = getattr(exc, "code", "EMBEDDING_UNAVAILABLE")
+        failure_code = error_code
+        logger.warning(
+            "document_index_embedding_failed",
+            extra={
+                "event": "document_index_embedding_failed", "error_code": error_code,
+                "chunk_count": len(chunks), "document_id": document_id,
+            },
+        )
+    result = store.replace_document_chunks(
+        user_id, document_id, document["version"], payload,
+        embedding_model=getattr(provider, "embedding_model", getattr(provider, "model", None)),
+    )
+    status = "ready" if payload and payload[0].get("embedding_status") == "ready" else "failed"
+    metrics.increment("nerva_document_index_total", status=status, error_code=failure_code or "none")
+    logger.info(
+        "document_index_completed",
+        extra={
+            "event": "document_index_completed", "chunk_count": len(result),
+            "elapsed_ms": int((time.perf_counter() - started) * 1000),
+            "model": getattr(provider, "embedding_model", getattr(provider, "model", "unknown")),
+            "document_id": document_id,
+        },
+    )
+    return result

@@ -87,7 +87,7 @@ class MemoryApiTest(unittest.TestCase):
             "status": "candidate",
         })
         self.assertEqual(invalid.status_code, 409)
-        self.assertEqual(invalid.json()["detail"]["code"], "MEMORY_STATUS_TRANSITION_INVALID")
+        self.assertEqual(invalid.json()["error"]["code"], "MEMORY_STATUS_TRANSITION_INVALID")
 
         self.assertEqual(self.client.delete(f"/v1/memories/{memory['id']}").status_code, 204)
         self.assertEqual(self.client.get(f"/v1/memories/{memory['id']}").status_code, 404)
@@ -102,7 +102,7 @@ class MemoryApiTest(unittest.TestCase):
             "kind": "style", "content": "  保留   api 原文  ",
         })
         self.assertEqual(duplicate.status_code, 409)
-        self.assertEqual(duplicate.json()["detail"]["code"], "MEMORY_DUPLICATE")
+        self.assertEqual(duplicate.json()["error"]["code"], "MEMORY_DUPLICATE")
 
         second = self.client.post("/v1/memories", json={
             "kind": "style", "content": "使用短句",
@@ -111,7 +111,7 @@ class MemoryApiTest(unittest.TestCase):
             "content": "保留 api 原文",
         })
         self.assertEqual(edited_duplicate.status_code, 409)
-        self.assertEqual(edited_duplicate.json()["detail"]["code"], "MEMORY_DUPLICATE")
+        self.assertEqual(edited_duplicate.json()["error"]["code"], "MEMORY_DUPLICATE")
 
     def test_candidate_transitions_and_cross_user_isolation(self):
         owner = self.code_login("memory-a@example.com")

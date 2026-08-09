@@ -38,7 +38,7 @@ class MigrationBootstrapTest(unittest.TestCase):
             database_url = f"sqlite+pysqlite:///{database_path.as_posix()}"
 
             self.run_alembic(database_url, "upgrade", "head")
-            self.assertIn("0011 (head)", self.run_alembic(database_url, "current"))
+            self.assertIn("0012 (head)", self.run_alembic(database_url, "current"))
             self.assertIn(
                 "No new upgrade operations detected",
                 self.run_alembic(database_url, "check"),
@@ -60,6 +60,7 @@ class MigrationBootstrapTest(unittest.TestCase):
                     "idx_document_chunks_user_status",
                     {item["name"] for item in inspector.get_indexes("document_chunks")},
                 )
+                self.assertIn("audit_events", inspector.get_table_names())
             finally:
                 engine.dispose()
 

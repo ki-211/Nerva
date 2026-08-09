@@ -104,6 +104,7 @@ export function ImageCapture({
           current.error?.message || '图片处理失败', 400, current.error?.code,
           current.source_id, current.error?.retryable,
           undefined, current.error?.requires_reupload,
+          current.source_id,
         );
       }
       await new Promise((resolve) => window.setTimeout(resolve, 1500));

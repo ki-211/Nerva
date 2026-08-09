@@ -1,6 +1,7 @@
 import { useCallback } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import type { User } from '../lib/types';
+import { clientLogger, exportDiagnosticLogs } from '../lib/clientLogger';
 import './AppShell.css';
 
 type Props = {
@@ -87,6 +88,12 @@ export function AppShell({
           <i /> 百炼 AI 已连接
           <br />
           <span>PostgreSQL · 两阶段知识整合</span>
+          <br />
+          <button type="button" onClick={() => exportDiagnosticLogs().catch((cause) => {
+            if ((cause as DOMException)?.name !== 'AbortError') {
+              clientLogger.error('diagnostic_export_failed', cause, { operation: 'diagnostics.export' });
+            }
+          })}>导出诊断日志</button>
         </div>
       </aside>
       <main>{children}</main>

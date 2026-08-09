@@ -1,0 +1,51 @@
+groups:
+  - name: nerva-api
+    rules:
+      - alert: NervaReadinessFailed
+        expr: probe_success{job="nerva-ready"} == 0
+        for: 30s
+        labels: { severity: critical }
+        annotations: { summary: "Nerva readiness 连续失败" }
+
+      - alert: NervaHigh5xxRate
+        expr: |
+          sum(rate(nerva_http_requests_total{status=~"5.."}[5m]))
+          / clamp_min(sum(rate(nerva_http_requests_total[5m])), 0.001) > 0.02
+        for: 5m
+        labels: { severity: critical }
+        annotations: { summary: "Nerva 5xx 比例超过 2%" }
+
+      - alert: NervaApiP95Slow
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le) (rate(nerva_http_request_duration_seconds_bucket[5m]))) > 2
+        for: 5m
+        labels: { severity: warning }
+        annotations: { summary: "Nerva 普通 API p95 超过 2 秒" }
+
+      - alert: NervaModelFailureRate
+        expr: |
+          sum by (operation) (rate(nerva_model_calls_total{status="failed"}[10m]))
+          / clamp_min(sum by (operation) (rate(nerva_model_calls_total[10m])), 0.001) > 0.10
+        for: 10m
+        labels: { severity: warning }
+        annotations: { summary: "Nerva 模型调用失败率超过 10%" }
+
+      - alert: NervaRetrievalFallbackHigh
+        expr: |
+          sum(rate(nerva_retrieval_total{fallback!="none"}[10m]))
+          / clamp_min(sum(rate(nerva_retrieval_total[10m])), 0.001) > 0.20
+        for: 10m
+        labels: { severity: warning }
+        annotations: { summary: "Nerva 检索降级比例超过 20%" }
+
+      - alert: NervaAdminLoginFailures
+        expr: increase(nerva_admin_login_total{outcome="failure"}[10m]) >= 5
+        labels: { severity: critical }
+        annotations: { summary: "管理员登录失败达到锁定阈值" }
+
+      - alert: NervaDatabasePoolHigh
+        expr: nerva_database_pool_utilization_ratio > 0.80
+        for: 5m
+        labels: { severity: warning }
+        annotations: { summary: "Nerva 数据库连接池使用率超过 80%" }

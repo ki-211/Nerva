@@ -324,6 +324,22 @@ knowledge_events = Table(
     CheckConstraint("rejected_count >= 0", name="ck_events_rejected_count"),
 )
 
+audit_events = Table(
+    "audit_events", metadata,
+    Column("id", String(40), primary_key=True),
+    Column("actor_user_id", String(40), ForeignKey("users.id", ondelete="SET NULL")),
+    Column("actor_role", String(20), nullable=False),
+    Column("action", String(80), nullable=False),
+    Column("target_type", String(40), nullable=False),
+    Column("target_id", String(128)),
+    Column("outcome", String(20), nullable=False),
+    Column("request_id", String(64), nullable=False),
+    Column("client_type", String(40), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    CheckConstraint("actor_role IN ('anonymous', 'user', 'admin', 'system')", name="ck_audit_actor_role"),
+    CheckConstraint("outcome IN ('success', 'failure', 'denied', 'locked')", name="ck_audit_outcome"),
+)
+
 Index("idx_sessions_user", sessions.c.user_id, sessions.c.expires_at.desc())
 Index("idx_email_codes_email_created", email_verification_codes.c.email, email_verification_codes.c.created_at.desc())
 Index("idx_sources_user", sources.c.user_id, sources.c.created_at.desc())
@@ -350,6 +366,9 @@ Index("idx_memories_user_active", user_memories.c.user_id, user_memories.c.statu
 Index("idx_memories_user_created", user_memories.c.user_id, user_memories.c.created_at)
 Index("idx_chat_sessions_user_updated", chat_sessions.c.user_id, chat_sessions.c.updated_at)
 Index("idx_chat_messages_session_created", chat_messages.c.session_id, chat_messages.c.created_at)
+Index("idx_audit_events_created", audit_events.c.created_at.desc())
+Index("idx_audit_events_actor_created", audit_events.c.actor_user_id, audit_events.c.created_at.desc())
+Index("idx_audit_events_action_target", audit_events.c.action, audit_events.c.target_id, audit_events.c.created_at.desc())
 
 
 class Store:
@@ -452,6 +471,40 @@ class Store:
             rows = db.execute(query).mappings()
             return [dict(row) for row in rows]
 
+    def record_audit_event(
+        self, *, actor_user_id: str | None, actor_role: str, action: str,
+        target_type: str, target_id: str | None, outcome: str,
+        request_id: str, client_type: str,
+    ) -> str:
+        event_id = new_id("aud")
+        with self.engine.begin() as db:
+            db.execute(insert(audit_events).values(
+                id=event_id, actor_user_id=actor_user_id, actor_role=actor_role,
+                action=action, target_type=target_type, target_id=target_id,
+                outcome=outcome, request_id=request_id, client_type=client_type,
+                created_at=now_utc(),
+            ))
+        return event_id
+
+    def count_recent_audit_events(
+        self, *, action: str, target_id: str, outcomes: tuple[str, ...], since: datetime,
+    ) -> int:
+        with self.engine.connect() as db:
+            return int(db.execute(select(func.count()).select_from(audit_events).where(
+                audit_events.c.action == action,
+                audit_events.c.target_id == target_id,
+                audit_events.c.outcome.in_(outcomes),
+                audit_events.c.created_at >= since,
+            )).scalar_one())
+
+    def list_audit_events(self, *, action: str | None = None) -> list[dict]:
+        query = select(audit_events)
+        if action:
+            query = query.where(audit_events.c.action == action)
+        query = query.order_by(audit_events.c.created_at, audit_events.c.id)
+        with self.engine.connect() as db:
+            return [dict(row) for row in db.execute(query).mappings()]
+
     def list_knowledge_ownership(self) -> list[dict]:
         with self.engine.connect() as db:
             rows = db.execute(select(
@@ -463,14 +516,10 @@ class Store:
             ).join(users, users.c.id == documents.c.user_id).order_by(
                 documents.c.updated_at.desc(), documents.c.id,
             )).mappings()
-            return [dict(row) for row in rows]
-
-    def get_document_for_admin(self, document_id: str) -> dict | None:
-        with self.engine.connect() as db:
-            row = db.execute(select(documents).where(
-                documents.c.id == document_id,
-            )).mappings().first()
-            return dict(row) if row else None
+            result = [dict(row) for row in rows]
+        for item in result:
+            item["index_status"] = self.get_document_index_status(item["user_id"], item["id"])
+        return result
 
     def create_session(self, user_id: str, token_hash: str, expires_at: datetime) -> None:
         with self.engine.begin() as db:
@@ -541,14 +590,20 @@ class Store:
             rows = db.execute(select(documents).where(
                 documents.c.user_id == user_id
             ).order_by(documents.c.updated_at.desc())).mappings()
-            return [dict(row) for row in rows]
+            result = [dict(row) for row in rows]
+        for item in result:
+            item["index_status"] = self.get_document_index_status(item["user_id"], item["id"])
+        return result
 
     def list_public_documents(self) -> list[dict]:
         with self.engine.connect() as db:
             rows = db.execute(select(documents).where(
                 documents.c.visibility == "public",
             ).order_by(documents.c.updated_at.desc())).mappings()
-            return [dict(row) for row in rows]
+            result = [dict(row) for row in rows]
+        for item in result:
+            item["index_status"] = self.get_document_index_status(item["user_id"], item["id"])
+        return result
 
     def create_public_document(
         self, user_id: str, *, title: str, markdown: str, document_id: str | None = None,
@@ -587,7 +642,57 @@ class Store:
                 documents.c.id == document_id,
                 (documents.c.user_id == user_id) | (documents.c.visibility == "public"),
             )).mappings().first()
-            return dict(row) if row else None
+            result = dict(row) if row else None
+        if result:
+            result["index_status"] = self.get_document_index_status(result["user_id"], result["id"])
+        return result
+
+    def get_owned_document(self, user_id: str, document_id: str) -> dict | None:
+        with self.engine.connect() as db:
+            row = db.execute(select(documents).where(
+                documents.c.id == document_id,
+                documents.c.user_id == user_id,
+            )).mappings().first()
+            result = dict(row) if row else None
+        if result:
+            result["index_status"] = self.get_document_index_status(user_id, document_id)
+        return result
+
+    def get_document_index_status(self, user_id: str, document_id: str) -> str:
+        with self.engine.connect() as db:
+            rows = db.execute(select(
+                document_chunks.c.embedding_status,
+                func.count().label("count"),
+            ).where(
+                document_chunks.c.user_id == user_id,
+                document_chunks.c.document_id == document_id,
+            ).group_by(document_chunks.c.embedding_status)).all()
+        counts = {row.embedding_status: int(row.count) for row in rows}
+        if not counts or counts.get("pending"):
+            return "pending"
+        if counts.get("ready"):
+            return "ready"
+        return "failed"
+
+    def list_pending_index_documents(self, *, older_than: datetime, limit: int) -> list[dict]:
+        with self.engine.connect() as db:
+            rows = db.execute(select(
+                document_chunks.c.user_id,
+                document_chunks.c.document_id,
+            ).where(
+                document_chunks.c.embedding_status == "pending",
+                document_chunks.c.updated_at <= older_than,
+            ).group_by(
+                document_chunks.c.user_id, document_chunks.c.document_id,
+            ).order_by(func.min(document_chunks.c.updated_at)).limit(limit)).mappings()
+            return [dict(row) for row in rows]
+
+    def count_chunks_by_status(self) -> dict[str, int]:
+        with self.engine.connect() as db:
+            rows = db.execute(select(
+                document_chunks.c.embedding_status, func.count().label("count"),
+            ).group_by(document_chunks.c.embedding_status)).all()
+            return {row.embedding_status: int(row.count) for row in rows}
 
     def list_document_chunks(
         self, user_id: str, *, document_id: str | None = None,

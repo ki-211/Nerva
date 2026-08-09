@@ -101,8 +101,8 @@ class AuthApiTest(unittest.TestCase):
         main.ai = FailingAI()
         failed = self.client.post("/v1/ingestions", json={"content": "Retry this knowledge"})
         self.assertEqual(failed.status_code, 503)
-        self.assertEqual(failed.json()["detail"]["code"], "AI_TIMEOUT")
-        source_id = failed.json()["detail"]["source_id"]
+        self.assertEqual(failed.json()["error"]["code"], "AI_TIMEOUT")
+        source_id = failed.json()["error"]["source_id"]
 
         self.client.post("/v1/auth/logout")
         self.assertEqual(self.code_login("retry-b@example.com").status_code, 200)
@@ -145,8 +145,8 @@ class AuthApiTest(unittest.TestCase):
             "title": "Stale", "markdown": "Stale", "base_version": 1,
         })
         self.assertEqual(conflict.status_code, 409)
-        self.assertEqual(conflict.json()["detail"]["code"], "DOCUMENT_VERSION_CONFLICT")
-        self.assertEqual(conflict.json()["detail"]["current_version"], 2)
+        self.assertEqual(conflict.json()["error"]["code"], "DOCUMENT_VERSION_CONFLICT")
+        self.assertEqual(conflict.json()["error"]["current_version"], 2)
         self.assertEqual(self.client.put(f"/v1/documents/{document_id}", json={
             "title": " ", "markdown": " ", "base_version": 2,
         }).status_code, 422)
@@ -159,7 +159,7 @@ class AuthApiTest(unittest.TestCase):
             "title": "Attack", "markdown": "Attack", "base_version": 2,
         }).status_code, 404)
 
-    def test_upstream_details_are_logged_but_not_returned(self):
+    def test_safe_upstream_identifiers_are_logged_without_message_or_response_leakage(self):
         class FailingAI:
             provider = "bailian"
             model = "qwen3.6-flash"
@@ -185,13 +185,13 @@ class AuthApiTest(unittest.TestCase):
             response = self.client.post("/v1/ingestions", json={"content": "Trigger logging"})
 
         self.assertEqual(response.status_code, 502)
-        self.assertEqual(response.json()["detail"]["message"], "模型服务暂时不可用")
+        self.assertEqual(response.json()["error"]["message"], "AI 服务处理失败，请稍后重试")
         self.assertNotIn("upstream_status", response.text)
         log_output = "\n".join(captured.output)
         self.assertIn("upstream_status=400", log_output)
         self.assertIn("upstream_code=InvalidParameter", log_output)
-        self.assertIn("request_id=req-123", log_output)
-        self.assertIn("upstream_message='Json mode response is not supported when thinking is enabled'", log_output)
+        self.assertIn("provider_request_id=req-123", log_output)
+        self.assertNotIn("Json mode response is not supported", log_output)
 
 
 if __name__ == "__main__":

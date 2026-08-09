@@ -28,6 +28,7 @@ export type ChangeSet = {
 export type Document = {
   id: string; title: string; markdown: string; version: number;
   created_at: string; updated_at: string; visibility: 'private' | 'public';
+  index_status: 'pending' | 'ready' | 'failed';
 };
 export type DocumentVersion = {
   version: number; title: string; markdown: string; reason: string; created_at: string;
@@ -74,6 +75,7 @@ export type KnowledgeOwnership = {
   title: string;
   version: number;
   visibility: 'private' | 'public';
+  index_status: 'pending' | 'ready' | 'failed';
   created_at: string;
   updated_at: string;
 };
@@ -172,4 +174,5 @@ export type ApiStreamError = {
   code: string;
   message: string;
   retryable: boolean;
+  request_id?: string;
 };

@@ -136,7 +136,7 @@ class BailianAITest(unittest.TestCase):
         self.assertFalse(error.retryable)
         self.assertEqual(error.upstream_status, 400)
         self.assertEqual(error.upstream_code, "InvalidParameter")
-        self.assertEqual(error.upstream_message, "Json mode response is not supported when thinking is enabled")
+        self.assertIsNone(error.upstream_message)
         self.assertEqual(error.request_id, "req-123 ignored")
 
     def test_server_error_remains_retryable(self):

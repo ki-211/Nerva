@@ -2,6 +2,8 @@ import React, { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { api } from './lib/api';
+import { ApiError, displayError } from './lib/errors';
+import { clientLogger, initializeClientMonitoring } from './lib/clientLogger';
 import type { Document, KnowledgeEvent, User } from './lib/types';
 import { AuthPage } from './features/auth/AuthPage';
 import { AppShell } from './app/AppShell';
@@ -12,21 +14,69 @@ import { ChatPage } from './features/chat/ChatPage';
 import { SearchPage } from './features/search/SearchPage';
 import { AdminPage } from './features/admin/AdminPage';
 import { PrintExportPage } from './features/documents/exportViews';
+import { ErrorBoundary } from './app/ErrorBoundary';
+import { GlobalErrorNotice, notifyGlobalError } from './app/GlobalErrorNotice';
 import './styles.css';
+
+initializeClientMonitoring();
+
+function reportGlobalFailure(operation: string, cause: unknown): void {
+  const error = cause instanceof ApiError
+    ? cause
+    : new ApiError('操作失败，请稍后重试', 0, 'CLIENT_UNHANDLED_ERROR');
+  clientLogger.error(operation, cause, {
+    operation, errorCode: error.code, requestId: error.requestId,
+  });
+  notifyGlobalError(error.message);
+}
+
+window.addEventListener('error', (event) => {
+  reportGlobalFailure('window.error', event.error);
+});
+window.addEventListener('unhandledrejection', (event) => {
+  reportGlobalFailure('window.unhandledrejection', event.reason);
+});
 
 function Root() {
   const [user, setUser] = useState<User | null>(null);
   const [ready, setReady] = useState(false);
+  const [startupError, setStartupError] = useState<ApiError | null>(null);
+  const [restoreAttempt, setRestoreAttempt] = useState(0);
 
   useEffect(() => {
+    setReady(false);
+    setStartupError(null);
     api
       .me()
       .then(setUser)
-      .catch(() => setUser(null))
+      .catch((cause) => {
+        if (cause instanceof ApiError && cause.status === 401) {
+          setUser(null);
+          return;
+        }
+        const error = cause instanceof ApiError ? cause : new ApiError('服务暂时不可用，请检查网络', 0);
+        setStartupError(error);
+        clientLogger.error('session_restore_failed', cause, {
+          operation: 'auth.restore', errorCode: error.code, requestId: error.requestId,
+        });
+      })
       .finally(() => setReady(true));
+  }, [restoreAttempt]);
+
+  useEffect(() => {
+    const expire = () => setUser(null);
+    window.addEventListener('nerva:session-expired', expire);
+    return () => window.removeEventListener('nerva:session-expired', expire);
   }, []);
 
   if (!ready) return <div className="auth-loading">正在恢复 Nerva 会话…</div>;
+  if (startupError) return (
+    <main className="fatal-error" role="alert">
+      <h1>暂时无法连接 Nerva</h1>
+      <p>{displayError(startupError)}</p>
+      <button type="button" onClick={() => setRestoreAttempt((value) => value + 1)}>重试</button>
+    </main>
+  );
 
   return (
     <Routes>
@@ -125,11 +175,6 @@ function KnowledgeApp({ user, onSignedOut }: { user: User; onSignedOut: () => vo
     setEvents(evts);
   };
 
-  const handleAuthError = () => {
-    onSignedOut();
-    navigate('/login', { replace: true, state: { from: location.pathname } });
-  };
-
   const signOut = async () => {
     setBusy(true);
     try {
@@ -154,7 +199,6 @@ function KnowledgeApp({ user, onSignedOut }: { user: User; onSignedOut: () => vo
         <CaptureView
           publicDocumentId={selectedPublicDocumentId}
           onRefresh={handleRefresh}
-          onAuthError={handleAuthError}
         />
       )}
 
@@ -168,7 +212,6 @@ function KnowledgeApp({ user, onSignedOut }: { user: User; onSignedOut: () => vo
               : `/library/${encodeURIComponent(id)}`
           )}
           onOpenCapture={() => navigate('/')}
-          onAuthError={handleAuthError}
         />
       )}
 
@@ -179,7 +222,6 @@ function KnowledgeApp({ user, onSignedOut }: { user: User; onSignedOut: () => vo
               ? `/?public_document=${encodeURIComponent(id)}#public-knowledge`
               : `/library/${encodeURIComponent(id)}`
           )}
-          onAuthError={handleAuthError}
         />
       )}
 
@@ -196,7 +238,7 @@ function KnowledgeApp({ user, onSignedOut }: { user: User; onSignedOut: () => vo
         />
       )}
 
-      {view === 'admin' && user.role === 'admin' && <AdminPage user={user} onAuthError={handleAuthError} />}
+      {view === 'admin' && user.role === 'admin' && <AdminPage user={user} />}
 
       {view === 'growth' && (
         <GrowthView
@@ -208,15 +250,18 @@ function KnowledgeApp({ user, onSignedOut }: { user: User; onSignedOut: () => vo
         />
       )}
 
-      {view === 'memories' && <MemoriesPage onAuthError={handleAuthError} />}
+      {view === 'memories' && <MemoriesPage />}
     </AppShell>
   );
 }
 
 createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <BrowserRouter>
-      <Root />
-    </BrowserRouter>
+    <ErrorBoundary>
+      <BrowserRouter>
+        <Root />
+        <GlobalErrorNotice />
+      </BrowserRouter>
+    </ErrorBoundary>
   </React.StrictMode>
 );

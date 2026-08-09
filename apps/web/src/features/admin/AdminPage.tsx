@@ -1,23 +1,18 @@
 import { useEffect, useState } from 'react';
-import { ApiError, api } from '../../lib/api';
-import type { AdminUser, Document, KnowledgeOwnership, User } from '../../lib/types';
-import { MarkdownView } from '../documents/knowledgeViews';
+import { api } from '../../lib/api';
+import type { AdminUser, KnowledgeOwnership, User } from '../../lib/types';
 import { PublicLibraryPage } from '../documents/PublicLibraryPage';
 import './admin.css';
 
 type Props = {
   user: User;
-  onAuthError: () => void;
 };
 
-export function AdminPage({ user, onAuthError }: Props) {
+export function AdminPage({ user }: Props) {
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [ownership, setOwnership] = useState<KnowledgeOwnership[]>([]);
   const [publicDocumentId, setPublicDocumentId] = useState<string | null>(null);
   const [selectedOwnership, setSelectedOwnership] = useState<KnowledgeOwnership | null>(null);
-  const [selectedDocument, setSelectedDocument] = useState<Document | null>(null);
-  const [detailLoading, setDetailLoading] = useState(false);
-  const [detailError, setDetailError] = useState('');
   const [error, setError] = useState('');
 
   useEffect(() => {
@@ -27,36 +22,11 @@ export function AdminPage({ user, onAuthError }: Props) {
         setOwnership(nextOwnership);
       })
       .catch((cause) => {
-        if (cause instanceof ApiError && (cause.status === 401 || cause.status === 403)) {
-          return onAuthError();
-        }
         setError(cause instanceof Error ? cause.message : '管理员数据加载失败');
       });
-  }, [onAuthError]);
+  }, []);
 
-  const openDocument = async (item: KnowledgeOwnership) => {
-    setSelectedOwnership(item);
-    setSelectedDocument(null);
-    setDetailError('');
-    setDetailLoading(true);
-    try {
-      setSelectedDocument(await api.adminDocument(item.id));
-    } catch (cause) {
-      if (cause instanceof ApiError && (cause.status === 401 || cause.status === 403)) {
-        onAuthError();
-        return;
-      }
-      setDetailError(cause instanceof Error ? cause.message : '文档详情加载失败');
-    } finally {
-      setDetailLoading(false);
-    }
-  };
-
-  const closeDocument = () => {
-    setSelectedOwnership(null);
-    setSelectedDocument(null);
-    setDetailError('');
-  };
+  const closeDocument = () => setSelectedOwnership(null);
 
   return (
     <section className="admin-page">
@@ -91,7 +61,7 @@ export function AdminPage({ user, onAuthError }: Props) {
 
       <section className="admin-panel">
         <div className="admin-panel-heading">
-          <div><h2>知识库归属</h2><p>点击任意文档行查看完整正文和归属信息。</p></div>
+          <div><h2>知识库归属</h2><p>仅展示标题、归属、版本和状态；管理员不能读取普通用户私有正文。</p></div>
         </div>
         <div className="admin-table">
           <div className="admin-row ownership head"><span>文档</span><span>归属</span><span>范围</span><span>版本</span></div>
@@ -100,12 +70,12 @@ export function AdminPage({ user, onAuthError }: Props) {
               type="button"
               className="admin-row ownership data-row"
               key={item.id}
-              onClick={() => openDocument(item)}
+              onClick={() => setSelectedOwnership(item)}
             >
               <span><b>{item.title}</b><small>{new Date(item.updated_at).toLocaleString('zh-CN')}</small></span>
               <span>{item.owner_display_name}<small>{item.owner_email}</small></span>
-              <span>{item.visibility === 'public' ? '大众知识库' : '私有'}</span>
-              <span>v{item.version}<small>查看详情 →</small></span>
+              <span>{item.visibility === 'public' ? '大众知识库' : '私有'}<small>{item.index_status === 'ready' ? '索引完成' : item.index_status === 'failed' ? '索引失败·关键词可用' : '索引处理中'}</small></span>
+              <span>v{item.version}<small>查看元数据 →</small></span>
             </button>
           ))}
         </div>
@@ -118,7 +88,6 @@ export function AdminPage({ user, onAuthError }: Props) {
           user={user}
           documentId={publicDocumentId}
           onOpen={(id) => setPublicDocumentId(id || null)}
-          onAuthError={onAuthError}
         />
       </section>
 
@@ -140,14 +109,17 @@ export function AdminPage({ user, onAuthError }: Props) {
               </div>
               <button type="button" className="secondary" onClick={closeDocument}>关闭</button>
             </div>
-            <div className="admin-detail-body">
-              {detailLoading && <div className="admin-detail-state">正在加载文档详情…</div>}
-              {detailError && <div className="admin-error">{detailError}</div>}
-              {selectedDocument && <MarkdownView markdown={selectedDocument.markdown} />}
+            <div className="admin-detail-body admin-metadata-only">
+              <dl>
+                <dt>文档 ID</dt><dd>{selectedOwnership.id}</dd>
+                <dt>用户 ID</dt><dd>{selectedOwnership.user_id}</dd>
+                <dt>创建时间</dt><dd>{new Date(selectedOwnership.created_at).toLocaleString('zh-CN')}</dd>
+                <dt>更新时间</dt><dd>{new Date(selectedOwnership.updated_at).toLocaleString('zh-CN')}</dd>
+              </dl>
+              <div className="admin-private-note">
+                正文未传输到管理端。大众知识正文仅通过下方“大众知识库维护”读取和编辑。
+              </div>
             </div>
-            {selectedOwnership.visibility === 'private' && (
-              <div className="admin-private-note">管理员仅可查看归属用户的私有文档，不能在此修改。</div>
-            )}
           </section>
         </div>
       )}

@@ -191,12 +191,12 @@ class ImageIngestionApiTest(unittest.TestCase):
             files=[("files", ("fake.png", b"not-an-image", "image/png"))],
         )
         self.assertEqual(invalid.status_code, 400)
-        self.assertEqual(invalid.json()["detail"]["code"], "IMAGE_INVALID")
+        self.assertEqual(invalid.json()["error"]["code"], "IMAGE_INVALID")
 
         same = png_bytes((20, 30, 40))
         duplicate = self.upload([same, same])
         self.assertEqual(duplicate.status_code, 400)
-        self.assertEqual(duplicate.json()["detail"]["code"], "IMAGE_DUPLICATE")
+        self.assertEqual(duplicate.json()["error"]["code"], "IMAGE_DUPLICATE")
         with main.store.engine.connect() as db:
             from app.store import sources
             rows = db.execute(sources.select().where(sources.c.user_id == user["id"])).all()
@@ -207,17 +207,17 @@ class ImageIngestionApiTest(unittest.TestCase):
 
         too_many = self.upload([png_bytes((index, 0, 0)) for index in range(11)])
         self.assertEqual(too_many.status_code, 400)
-        self.assertEqual(too_many.json()["detail"]["code"], "IMAGE_COUNT_INVALID")
+        self.assertEqual(too_many.json()["error"]["code"], "IMAGE_COUNT_INVALID")
 
         with patch("app.image_ingestion.MAX_BATCH_BYTES", 100):
             too_large = self.upload([png_bytes((1, 2, 3))])
         self.assertEqual(too_large.status_code, 400)
-        self.assertEqual(too_large.json()["detail"]["code"], "IMAGE_BATCH_TOO_LARGE")
+        self.assertEqual(too_large.json()["error"]["code"], "IMAGE_BATCH_TOO_LARGE")
 
         with patch("app.image_ingestion.MAX_IMAGE_PIXELS", 100):
             too_many_pixels = self.upload([png_bytes((2, 3, 4))])
         self.assertEqual(too_many_pixels.status_code, 400)
-        self.assertEqual(too_many_pixels.json()["detail"]["code"], "IMAGE_PIXEL_LIMIT_EXCEEDED")
+        self.assertEqual(too_many_pixels.json()["error"]["code"], "IMAGE_PIXEL_LIMIT_EXCEEDED")
 
         animation = io.BytesIO()
         frames = [Image.new("RGB", (8, 8), color) for color in ((255, 0, 0), (0, 0, 255))]
@@ -229,7 +229,7 @@ class ImageIngestionApiTest(unittest.TestCase):
             files=[("files", ("animated.webp", animation.getvalue(), "image/webp"))],
         )
         self.assertEqual(animated.status_code, 400)
-        self.assertEqual(animated.json()["detail"]["code"], "IMAGE_ANIMATION_UNSUPPORTED")
+        self.assertEqual(animated.json()["error"]["code"], "IMAGE_ANIMATION_UNSUPPORTED")
 
         with patch("app.image_ingestion.MAX_COMBINED_OCR_CHARS", 20):
             with self.assertRaisesRegex(ValueError, "100,000"):
@@ -246,7 +246,7 @@ class ImageIngestionApiTest(unittest.TestCase):
         self.assertTrue(own_status["error"]["requires_reupload"])
         retry = self.client.post(f"/v1/sources/{source_id}/retry")
         self.assertEqual(retry.status_code, 409)
-        self.assertEqual(retry.json()["detail"]["code"], "IMAGE_REUPLOAD_REQUIRED")
+        self.assertEqual(retry.json()["error"]["code"], "IMAGE_REUPLOAD_REQUIRED")
         source = main.store.get_source(user["id"], source_id)
         self.assertNotIn("data:image", source["content"])
 
@@ -361,7 +361,7 @@ class ImageIngestionApiTest(unittest.TestCase):
         self.assertEqual(applied.status_code, 200)
         rejected = self.client.post(f"/v1/sources/{source_id}/reprocess", json={})
         self.assertEqual(rejected.status_code, 409)
-        self.assertEqual(rejected.json()["detail"]["code"], "SOURCE_ALREADY_APPLIED")
+        self.assertEqual(rejected.json()["error"]["code"], "SOURCE_ALREADY_APPLIED")
 
     def test_failed_reprocess_leaves_previous_draft_available(self):
         self.login("failed-reprocess@example.com")

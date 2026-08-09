@@ -120,6 +120,7 @@ class Document(BaseModel):
     created_at: datetime
     updated_at: datetime
     visibility: Literal["private", "public"] = "private"
+    index_status: Literal["pending", "ready", "failed"] = "pending"
 
 
 class DocumentVersion(BaseModel):
@@ -343,6 +344,7 @@ class KnowledgeOwnership(BaseModel):
     title: str
     version: int
     visibility: Literal["private", "public"]
+    index_status: Literal["pending", "ready", "failed"]
     created_at: datetime
     updated_at: datetime
 
@@ -362,4 +364,4 @@ class PublicDocumentCreate(BaseModel):
 class ReindexResponse(BaseModel):
     document_id: str
     chunks: int
-    status: Literal["completed"]
+    status: Literal["queued", "completed"]

@@ -1,16 +1,15 @@
 import { FormEvent, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { ApiError, api } from '../../lib/api';
+import { api } from '../../lib/api';
 import type { SearchResponse } from '../../lib/types';
 import './search.css';
 
 type Props = {
   onOpenDocument: (documentId: string, visibility: 'private' | 'public') => void;
-  onAuthError: () => void;
 };
 
-export function SearchPage({ onOpenDocument, onAuthError }: Props) {
+export function SearchPage({ onOpenDocument }: Props) {
   const [query, setQuery] = useState('');
   const [response, setResponse] = useState<SearchResponse | null>(null);
   const [loading, setLoading] = useState(false);
@@ -30,10 +29,6 @@ export function SearchPage({ onOpenDocument, onAuthError }: Props) {
     try {
       setResponse(await api.search(normalized, 8, includePublic));
     } catch (cause) {
-      if (cause instanceof ApiError && cause.status === 401) {
-        onAuthError();
-        return;
-      }
       setError(cause instanceof Error ? cause.message : '检索失败，请稍后重试');
     } finally {
       setLoading(false);
