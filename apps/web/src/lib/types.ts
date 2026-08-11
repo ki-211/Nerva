@@ -58,6 +58,9 @@ export type KnowledgeEvent = {
 
 export type User = { id: string; email: string; display_name: string; role: 'user' | 'admin' };
 
+/** Response of the unauthenticated GET /health/ready readiness probe. */
+export type HealthReady = { status: string; version: string; database_revision?: string };
+
 export type AdminUser = User & {
   username: string | null;
   status: 'active' | 'disabled';

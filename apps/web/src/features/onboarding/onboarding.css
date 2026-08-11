@@ -1,0 +1,149 @@
+/* Reuses the palette and card chrome from ../auth/auth.css so the wizard and the
+   login page read as one continuous first-launch experience. */
+
+.onboarding-card {
+  width: min(560px, 100%);
+}
+
+.onboarding-steps {
+  display: flex;
+  gap: 6px;
+  margin: 0 0 26px;
+  padding: 0;
+  list-style: none;
+  font-size: 12px;
+  color: #8b958f;
+}
+
+.onboarding-steps li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+}
+
+.onboarding-steps li.current {
+  color: #1e684c;
+  font-weight: 700;
+}
+
+.onboarding-steps li.done {
+  color: #5c8a76;
+}
+
+.onboarding-step-dot {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #ecebe4;
+  color: #7d867f;
+  font-size: 11px;
+  font-weight: 700;
+  flex: 0 0 auto;
+}
+
+.onboarding-steps li.current .onboarding-step-dot {
+  background: #1e684c;
+  color: white;
+}
+
+.onboarding-steps li.done .onboarding-step-dot {
+  background: #d4efdf;
+  color: #1e684c;
+}
+
+.onboarding-card h1 {
+  margin: 10px 0 8px;
+}
+
+.onboarding-card p {
+  color: #6c7771;
+  line-height: 1.6;
+  margin: 0 0 16px;
+}
+
+.onboarding-hint {
+  font-size: 13px;
+  color: #869089;
+}
+
+.onboarding-ok {
+  color: #1e684c !important;
+  font-weight: 600;
+}
+
+.onboarding-field {
+  display: grid;
+  gap: 7px;
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 16px;
+}
+
+.onboarding-field textarea {
+  width: 100%;
+  border: 1px solid #d7d8d1;
+  background: #faf9f5;
+  border-radius: 10px;
+  padding: 12px 13px;
+  font: inherit;
+  line-height: 1.7;
+  resize: vertical;
+  outline: none;
+}
+
+.onboarding-field textarea:focus {
+  border-color: #4d896f;
+  box-shadow: 0 0 0 3px #e5f0ea;
+}
+
+.onboarding-summary {
+  padding: 16px 18px;
+  margin-bottom: 16px;
+  background: #f2f7f4;
+  border: 1px solid #dbe8e1;
+  border-radius: 12px;
+}
+
+.onboarding-summary p {
+  margin: 0 0 10px;
+  color: #33473d;
+}
+
+.onboarding-summary ul {
+  margin: 0;
+  padding-left: 18px;
+  color: #4f6459;
+  font-size: 13px;
+  line-height: 1.9;
+}
+
+.onboarding-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 22px;
+}
+
+.onboarding-actions button {
+  padding: 12px 20px;
+  border: 1px solid #d7d8d1;
+  border-radius: 10px;
+  background: #faf9f5;
+  color: #3d4a43;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.onboarding-actions button.primary {
+  border-color: #1e684c;
+  background: #1e684c;
+  color: white;
+}
+
+.onboarding-actions button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}

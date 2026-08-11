@@ -1,10 +1,12 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { api } from '../lib/api';
 import { ApiError, displayError } from '../lib/errors';
 import { clientLogger } from '../lib/clientLogger';
+import { completedUserIds, isOnboardingComplete } from '../lib/onboarding';
 import type { Document, KnowledgeEvent, User } from '../lib/types';
 import { UserAuthPage } from '../features/auth/UserAuthPage';
+import { OnboardingWizard, type OnboardingStep } from '../features/onboarding/OnboardingWizard';
 import { UserAppShell } from './UserAppShell';
 import { CaptureView } from '../features/capture/CaptureView';
 import { LibraryView, GrowthView } from '../features/documents/knowledgeViews';
@@ -20,6 +22,11 @@ export function UserApplication() {
   const [ready, setReady] = useState(false);
   const [startupError, setStartupError] = useState<ApiError | null>(null);
   const [restoreAttempt, setRestoreAttempt] = useState(0);
+  // A non-empty list means the wizard already ran on this device, which is the only
+  // signal available before api.me() resolves.
+  const [deviceKnown] = useState(() => completedUserIds().length > 0);
+  const [wizardDone, setWizardDone] = useState(false);
+  const [pendingChangeSetId, setPendingChangeSetId] = useState<string | null>(null);
 
   useEffect(() => {
     setReady(false); setStartupError(null);
@@ -37,7 +44,20 @@ export function UserApplication() {
     return () => window.removeEventListener('nerva:session-expired', expire);
   }, []);
 
+  const consumeChangeSet = useCallback(() => setPendingChangeSetId(null), []);
+
+  const onboardingStep: OnboardingStep | null = !ready || wizardDone ? null
+    : user ? (isOnboardingComplete(user.id) ? null : 'capture')
+    : deviceKnown ? null
+    : startupError ? 'connect' : 'welcome';
+
   if (!ready) return <div className="auth-loading">正在恢复 Nerva 会话…</div>;
+  if (onboardingStep) return <OnboardingWizard
+    initialStep={onboardingStep}
+    initialUser={user}
+    onAuthenticated={(loggedIn) => { setUser(loggedIn); setStartupError(null); }}
+    onFinish={(changeSetId) => { setPendingChangeSetId(changeSetId); setWizardDone(true); }}
+  />;
   if (startupError) return <main className="fatal-error" role="alert"><h1>暂时无法连接 Nerva</h1><p>{displayError(startupError)}</p><button type="button" onClick={() => setRestoreAttempt((value) => value + 1)}>重试</button></main>;
 
   return <Routes>
@@ -46,11 +66,18 @@ export function UserApplication() {
     <Route path="/admin" element={<Navigate to="/" replace />} />
     <Route path="/admin/*" element={<Navigate to="/" replace />} />
     <Route path="/export/print" element={user ? <PrintExportPage /> : <Navigate to="/login" replace state={{ from: location.pathname + location.search }} />} />
-    <Route path="/*" element={user ? <UserKnowledgeApp user={user} onSignedOut={() => setUser(null)} /> : <Navigate to="/login" replace state={{ from: location.pathname }} />} />
+    <Route path="/*" element={user ? <UserKnowledgeApp user={user} onSignedOut={() => setUser(null)} pendingChangeSetId={pendingChangeSetId} onChangeSetConsumed={consumeChangeSet} /> : <Navigate to="/login" replace state={{ from: location.pathname }} />} />
   </Routes>;
 }
 
-function UserKnowledgeApp({ user, onSignedOut }: { user: User; onSignedOut: () => void }) {
+type KnowledgeAppProps = {
+  user: User;
+  onSignedOut: () => void;
+  pendingChangeSetId?: string | null;
+  onChangeSetConsumed?: () => void;
+};
+
+function UserKnowledgeApp({ user, onSignedOut, pendingChangeSetId, onChangeSetConsumed }: KnowledgeAppProps) {
   const navigate = useNavigate();
   const location = useLocation();
   const [documents, setDocuments] = useState<Document[]>([]);
@@ -95,7 +122,7 @@ function UserKnowledgeApp({ user, onSignedOut }: { user: User; onSignedOut: () =
 
   return <UserAppShell user={user} documentCount={documents.length} eventCount={events.length} libraryDirty={libraryDirty} onSignOut={signOut}>
     {busy && <span className="visually-hidden">正在退出</span>}
-    {view === 'capture' && <CaptureView publicDocumentId={selectedPublicDocumentId} onRefresh={(docs, log) => { setDocuments(docs); setEvents(log); }} />}
+    {view === 'capture' && <CaptureView publicDocumentId={selectedPublicDocumentId} initialChangeSetId={pendingChangeSetId} onInitialChangeSetConsumed={onChangeSetConsumed} onRefresh={(docs, log) => { setDocuments(docs); setEvents(log); }} />}
     {view === 'chat' && <ChatPage sessionId={selectedChatSessionId} onOpenSession={(id) => navigate(id ? `/chat/${encodeURIComponent(id)}` : '/chat')} onOpenDocument={openDocument} onOpenCapture={() => navigate('/')} />}
     {view === 'research' && <ResearchPage sessionId={selectedResearchSessionId} onOpenSession={(id) => navigate(id ? `/research/${encodeURIComponent(id)}` : '/research')} onRefresh={(docs, log) => { setDocuments(docs); setEvents(log); }} />}
     {view === 'search' && <SearchPage onOpenDocument={openDocument} />}

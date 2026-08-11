@@ -1,4 +1,4 @@
-import type { ChatMessage, ChatSession, ChatStreamHandlers, ChangeSet, Document, DocumentVersion, KnowledgeEvent, KnowledgeHubSettings, KnowledgeHubSettingsUpdate, LongTermMemory, LongTermMemoryCreate, LongTermMemoryEvent, LongTermMemoryKind, LongTermMemoryMutation, LongTermMemoryStatus, LongTermMemoryUpdate, Memory, MemoryCreate, MemoryUpdate, ResearchMessage, ResearchMode, ResearchSession, ResearchStreamHandlers, SearchResponse, SourceProcessing, User } from './types';
+import type { ChatMessage, ChatSession, ChatStreamHandlers, ChangeSet, Document, DocumentVersion, HealthReady, KnowledgeEvent, KnowledgeHubSettings, KnowledgeHubSettingsUpdate, LongTermMemory, LongTermMemoryCreate, LongTermMemoryEvent, LongTermMemoryKind, LongTermMemoryMutation, LongTermMemoryStatus, LongTermMemoryUpdate, Memory, MemoryCreate, MemoryUpdate, ResearchMessage, ResearchMode, ResearchSession, ResearchStreamHandlers, SearchResponse, SourceProcessing, User } from './types';
 import { clientLogger } from './clientLogger';
 import { saveBlob } from './desktopRuntime';
 import {
@@ -12,6 +12,9 @@ const BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 const CLIENT_TYPE = import.meta.env.VITE_CLIENT_TYPE || 'web-development';
 const CLIENT_VERSION = import.meta.env.VITE_APP_VERSION || '0.1.0';
 const REQUEST_TIMEOUT_MS = 15_000;
+// Text ingestion waits for the full extract → retrieve → plan pipeline, which routinely
+// outlasts the default request budget.
+const INGESTION_TIMEOUT_MS = 120_000;
 const DOWNLOAD_TIMEOUT_MS = 120_000;
 const UPLOAD_TIMEOUT_MS = 300_000;
 const STREAM_CONNECT_TIMEOUT_MS = 30_000;
@@ -47,7 +50,7 @@ function logApiFailure(operation: string, error: ApiError): void {
   });
 }
 
-type RequestPolicy = { loginSubmission?: boolean };
+type RequestPolicy = { loginSubmission?: boolean; timeoutMs?: number };
 
 export async function request<T>(path: string, init?: RequestInit, policy: RequestPolicy = {}): Promise<T> {
   const controller = new AbortController();
@@ -56,7 +59,7 @@ export async function request<T>(path: string, init?: RequestInit, policy: Reque
     timeout = window.setTimeout(() => {
       controller.abort();
       reject(new DOMException('request timed out', 'AbortError'));
-    }, REQUEST_TIMEOUT_MS);
+    }, policy.timeoutMs ?? REQUEST_TIMEOUT_MS);
   });
   init?.signal?.addEventListener('abort', () => controller.abort(), { once: true });
   const headers = requestHeaders(init?.headers);
@@ -389,6 +392,7 @@ async function uploadImages(
 }
 
 export const api = {
+  health: () => request<HealthReady>('/health/ready'),
   sendVerificationCode: (email: string) => request<void>('/v1/auth/verification-codes', {
     method: 'POST', body: JSON.stringify({ email }),
   }),
@@ -399,7 +403,7 @@ export const api = {
   me: () => request<User>('/v1/auth/me'),
   createIngestion: (content: string, title?: string) => request<ChangeSet>('/v1/ingestions', {
     method: 'POST', body: JSON.stringify({ kind: 'text', content, title: title || null }),
-  }),
+  }, { timeoutMs: INGESTION_TIMEOUT_MS }),
   retrySource: (sourceId: string) => request<ChangeSet | SourceProcessing>(`/v1/sources/${sourceId}/retry`, {
     method: 'POST',
   }),

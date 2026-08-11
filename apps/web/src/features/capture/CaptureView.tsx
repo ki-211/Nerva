@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ApiError, api } from '../../lib/api';
 import type { ChangeSet, Document, KnowledgeEvent, SourceProcessing } from '../../lib/types';
@@ -11,9 +11,12 @@ import './CaptureView.css';
 type Props = {
   publicDocumentId: string | null;
   onRefresh: (docs: Document[], events: KnowledgeEvent[]) => void;
+  /** Change set handed over by the first-launch wizard, loaded once for review. */
+  initialChangeSetId?: string | null;
+  onInitialChangeSetConsumed?: () => void;
 };
 
-export function CaptureView({ publicDocumentId, onRefresh }: Props) {
+export function CaptureView({ publicDocumentId, onRefresh, initialChangeSetId, onInitialChangeSetConsumed }: Props) {
   const navigate = useNavigate();
   const [title, setTitle] = useState('');
   const [content, setContent] = useState('');
@@ -36,6 +39,18 @@ export function CaptureView({ publicDocumentId, onRefresh }: Props) {
     },
     []
   );
+
+  const initialDraftLoaded = useRef(false);
+  useEffect(() => {
+    if (!initialChangeSetId || initialDraftLoaded.current) return;
+    initialDraftLoaded.current = true;
+    onInitialChangeSetConsumed?.();
+    setBusy(true);
+    api.changeSet(initialChangeSetId).then((result) => {
+      setDraft(result);
+      setSelected(result.items.map((item) => item.id));
+    }).catch((e) => handleError(e, '草案加载失败')).finally(() => setBusy(false));
+  }, [initialChangeSetId, onInitialChangeSetConsumed, handleError]);
 
   const waitForSource = async (initial: SourceProcessing): Promise<ChangeSet> => {
     let current = initial;
