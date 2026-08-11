@@ -61,4 +61,27 @@ describe('user-only application entry', () => {
     expect(researchLayout?.firstElementChild).toBe(researchSidebar);
     expect(researchLayout?.lastElementChild).toHaveClass('research-workspace');
   });
+
+  it('redirects the legacy memories route to the knowledge hub in the desktop app', async () => {
+    configureApiTransport(vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      const payload = url.endsWith('/v1/auth/me')
+        ? {
+          id: 'user-1', email: 'user@example.com', display_name: 'Hub User',
+          role: 'user', created_at: '2026-08-09T00:00:00Z',
+        }
+        : url.endsWith('/v1/knowledge-hub/settings')
+          ? { personalization_enabled: true, auto_learning_enabled: true }
+          : [];
+      return Promise.resolve(new Response(JSON.stringify(payload), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      }));
+    }));
+
+    render(<MemoryRouter initialEntries={['/memories']}><UserApplication /></MemoryRouter>);
+
+    expect(await screen.findByRole('heading', { name: '知识中枢' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /知识中枢/ })).toHaveClass('active');
+    expect(screen.queryByText('个性化偏好')).not.toBeInTheDocument();
+  });
 });

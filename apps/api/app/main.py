@@ -3,6 +3,7 @@ import smtplib
 import hashlib
 import hmac
 import ipaddress
+import inspect
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -35,6 +36,11 @@ from .memories import (
     chat_memory_block, extract_memory_block, load_active_memories, normalize_memory_content,
     plan_memory_block,
 )
+from .long_term_memory import (
+    infer_and_store_long_term_memories, long_term_memory_block,
+    normalize_memory_text, public_long_term_memory, public_long_term_mutation,
+    retrieve_long_term_memories,
+)
 from .chat import (
     ChatStreamParser, build_chat_history,
     retrieve_chat_sources, should_infer_memory, sse_event, validated_citations,
@@ -59,7 +65,10 @@ from .prompts import EXTRACT_PROMPT_VERSION, MERGE_PROMPT_VERSION, OCR_PROMPT_VE
 from .schemas import (
     ApplyChangeSet, ChangeSet, Document, DocumentUpdate, DocumentVersion,
     ChatMessage, ChatMessageCreate, ChatSession, ChatSessionCreate, ChatSessionUpdate,
-    IngestionCreate, KnowledgeEvent, Memory, MemoryCreate, MemoryUpdate,
+    IngestionCreate, KnowledgeEvent, KnowledgeHubSettings, KnowledgeHubSettingsUpdate,
+    LongTermMemory, LongTermMemoryCreate, LongTermMemoryEvent, LongTermMemoryHistoryRequest,
+    LongTermMemoryMutation, LongTermMemoryUpdate,
+    Memory, MemoryCreate, MemoryUpdate,
     ReindexResponse, ReprocessSource, SearchResponse, SourceProcessing,
     CodeLoginRequest, SendVerificationCodeRequest, User,
     AdminLoginRequest, AdminUser, KnowledgeOwnership, PublicDocumentCreate,
@@ -90,7 +99,7 @@ ai = get_ai_adapter()
 ocr = get_ocr_adapter()
 index_executor: ThreadPoolExecutor | None = None
 index_executor_lock = Lock()
-EXPECTED_DATABASE_REVISION = "0013"
+EXPECTED_DATABASE_REVISION = "0016"
 
 
 def _get_index_executor() -> ThreadPoolExecutor:
@@ -326,11 +335,12 @@ def recover_interrupted_image_work() -> None:
     interrupted = store.fail_interrupted_image_sources()
     interrupted_chats = store.fail_interrupted_chat_messages()
     interrupted_research = store.fail_interrupted_research_messages()
-    if removed or interrupted or interrupted_chats or interrupted_research:
+    expired_memory_mutations = store.cleanup_expired_long_term_mutations()
+    if removed or interrupted or interrupted_chats or interrupted_research or expired_memory_mutations:
         logger.warning(
             "startup recovery removed_temp_dirs=%s interrupted_sources=%s "
-            "interrupted_chats=%s interrupted_research=%s",
-            removed, interrupted, interrupted_chats, interrupted_research,
+            "interrupted_chats=%s interrupted_research=%s expired_memory_mutations=%s",
+            removed, interrupted, interrupted_chats, interrupted_research, expired_memory_mutations,
         )
     cutoff = now_utc() - timedelta(minutes=settings.index_recovery_age_minutes)
     for pending in store.list_pending_index_documents(
@@ -620,8 +630,12 @@ def run_knowledge_pipeline(user_id: str, source_id: str):
     if not source or source["processing_status"] != "processing":
         raise HTTPException(status.HTTP_409_CONFLICT, "Source is not available for processing")
     try:
-        # Load user preferences once upfront for both pipeline stages
-        active_memories = load_active_memories(store, user_id)
+        # Load user preferences once upfront for both pipeline stages.
+        hub_settings = store.get_knowledge_hub_settings(user_id)
+        active_memories = (
+            load_active_memories(store, user_id)
+            if hub_settings["personalization_enabled"] else []
+        )
         extract_prefs = extract_memory_block(active_memories)
         plan_prefs = plan_memory_block(active_memories)
         # Track which memories were used so we can increment use_count at the end
@@ -736,7 +750,10 @@ def run_knowledge_pipeline(user_id: str, source_id: str):
 
         # After a successful reprocess with an analysis_instruction, ask the AI to
         # infer stable user preferences and write them as candidate memories for review.
-        if instruction and hasattr(ai, "infer_preferences"):
+        if (
+            instruction and hub_settings["auto_learning_enabled"]
+            and hasattr(ai, "infer_preferences")
+        ):
             _try_infer_and_store_memories(ai, store, user_id, instruction, source["title"])
 
         return change_set
@@ -1340,9 +1357,23 @@ def _chat_stream(
             include_public=bool(user_message.get("include_public", True)),
         )
         history = build_chat_history(messages)
-        active_memories = load_active_memories(store, user_id)
+        hub_settings = store.get_knowledge_hub_settings(user_id)
+        active_memories = (
+            load_active_memories(store, user_id)
+            if hub_settings["personalization_enabled"] else []
+        )
         chat_memories = [item for item in active_memories if item["kind"] in {"domain", "style"}]
-        memory_block = chat_memory_block(chat_memories)
+        recalled_memories = (
+            retrieve_long_term_memories(store, ai, user_id, query)
+            if hub_settings["long_term_memory_enabled"] else []
+        )
+        memory_block = "\n\n".join(filter(None, [
+            chat_memory_block(chat_memories), long_term_memory_block(recalled_memories),
+        ]))
+        if recalled_memories:
+            yield sse_event("memory_context", {
+                "memories": [public_long_term_memory(item) for item in recalled_memories],
+            })
         logger.info(
             "chat_context_prepared user_id=%s session_id=%s history_messages=%s sources=%s memories=%s",
             user_id, assistant_message["session_id"], len(history), len(sources), len(chat_memories),
@@ -1377,6 +1408,7 @@ def _chat_stream(
         saved = store.complete_chat_message(
             user_id, assistant_message["id"], content=answer,
             grounding=grounding, citations=citations,
+            memory_refs=[item["id"] for item in recalled_memories],
         )
         if not saved:
             raise RuntimeError("Chat message is no longer generating")
@@ -1384,18 +1416,39 @@ def _chat_stream(
         outcome = "completed"
         try:
             store.increment_memory_usage(user_id, [item["id"] for item in chat_memories])
+            store.increment_long_term_memory_usage(
+                user_id, [item["id"] for item in recalled_memories],
+            )
         except Exception:
             logger.warning(
                 "chat_memory_usage_update_failed user_id=%s message_id=%s",
                 user_id, assistant_message["id"],
             )
         candidates = []
-        if should_infer_memory(user_message["content"]):
+        if (
+            hub_settings["auto_learning_enabled"]
+            and should_infer_memory(user_message["content"])
+        ):
             candidates = _try_infer_and_store_memories(
                 ai, store, user_id, user_message["content"], "knowledge_chat",
             )
         if candidates:
             yield sse_event("memory_candidates", {"memories": candidates})
+        learned = infer_and_store_long_term_memories(
+            ai, store, user_id, user_content=user_message["content"],
+            assistant_content=answer, recent_context=history[:-1], source_channel="chat",
+            source_session_id=assistant_message["session_id"],
+            source_message_id=user_message["id"],
+            allow_implicit=hub_settings["auto_learning_enabled"],
+        )
+        if learned["candidates"]:
+            yield sse_event("long_term_memory_candidates", {
+                "memories": [public_long_term_memory(item) for item in learned["candidates"]],
+            })
+        for mutation in learned["mutations"]:
+            yield sse_event("long_term_memory_mutation", {
+                "mutation": public_long_term_mutation(mutation),
+            })
         logger.info(
             "chat_generation_completed user_id=%s session_id=%s assistant_message_id=%s "
             "grounding=%s citations=%s candidates=%s answer_chars=%s elapsed_ms=%s",
@@ -1581,7 +1634,23 @@ def _research_stream(
             for item in messages
             if item["status"] == "completed" and item["content"]
         ][-20:]
-        for event in ai.stream_research(history, assistant_message["requested_mode"]):
+        hub_settings = store.get_knowledge_hub_settings(user_id)
+        recalled_memories = (
+            retrieve_long_term_memories(store, ai, user_id, user_message["content"])
+            if hub_settings["long_term_memory_enabled"] else []
+        )
+        memory_block = long_term_memory_block(recalled_memories)
+        if recalled_memories:
+            yield sse_event("memory_context", {
+                "memories": [public_long_term_memory(item) for item in recalled_memories],
+            })
+        research_parameters = inspect.signature(ai.stream_research).parameters
+        research_events = (
+            ai.stream_research(history, assistant_message["requested_mode"], memory_block=memory_block)
+            if "memory_block" in research_parameters
+            else ai.stream_research(history, assistant_message["requested_mode"])
+        )
+        for event in research_events:
             if event.get("type") == "delta":
                 delta = event.get("text") or ""
                 if delta:
@@ -1605,11 +1674,32 @@ def _research_stream(
         saved = store.complete_research_message(
             user_id, assistant_message["id"], content=answer,
             basis=basis, citations=citations,
+            memory_refs=[item["id"] for item in recalled_memories],
         )
         if not saved:
             raise RuntimeError("Research message is no longer generating")
         completed = True
         outcome = "completed"
+        try:
+            store.increment_long_term_memory_usage(
+                user_id, [item["id"] for item in recalled_memories],
+            )
+        except Exception:
+            logger.warning("research_memory_usage_update_failed user_id=%s", user_id)
+        learned = infer_and_store_long_term_memories(
+            ai, store, user_id, user_content=user_message["content"],
+            assistant_content=answer, recent_context=history[:-1], source_channel="research",
+            source_session_id=assistant_message["session_id"], source_message_id=user_message["id"],
+            allow_implicit=hub_settings["auto_learning_enabled"],
+        )
+        if learned["candidates"]:
+            yield sse_event("long_term_memory_candidates", {
+                "memories": [public_long_term_memory(item) for item in learned["candidates"]],
+            })
+        for mutation in learned["mutations"]:
+            yield sse_event("long_term_memory_mutation", {
+                "mutation": public_long_term_mutation(mutation),
+            })
         yield sse_event("done", {"message": saved})
     except GeneratorExit:
         if not completed:
@@ -1765,6 +1855,157 @@ def list_memories(
     user: dict = Depends(current_user),
 ):
     return store.list_memories(user["id"], status=status)
+
+
+@app.get("/v1/knowledge-hub/settings", response_model=KnowledgeHubSettings)
+def get_knowledge_hub_settings(user: dict = Depends(current_user)):
+    return store.get_knowledge_hub_settings(user["id"])
+
+
+@app.patch("/v1/knowledge-hub/settings", response_model=KnowledgeHubSettings)
+def update_knowledge_hub_settings(
+    payload: KnowledgeHubSettingsUpdate,
+    user: dict = Depends(current_user),
+):
+    return store.update_knowledge_hub_settings(
+        user["id"],
+        personalization_enabled=payload.personalization_enabled,
+        auto_learning_enabled=payload.auto_learning_enabled,
+        long_term_memory_enabled=payload.long_term_memory_enabled,
+    )
+
+
+def _long_term_embedding(subject: str, content: str) -> tuple[list[float] | None, str | None]:
+    model = getattr(ai, "embedding_model", getattr(ai, "model", None))
+    try:
+        return ai.embed([f"{subject}\n{content}"])[0], model
+    except Exception:
+        return None, model
+
+
+@app.get("/v1/long-term-memories", response_model=list[LongTermMemory])
+def list_long_term_memories(
+    status_filter: Literal["active", "candidate", "suppressed"] | None = Query(None, alias="status"),
+    kind: Literal["person", "project", "decision", "fact"] | None = None,
+    q: str | None = Query(None, max_length=200),
+    user: dict = Depends(current_user),
+):
+    return store.list_long_term_memories(
+        user["id"], status=status_filter, kind=kind, query=q,
+    )
+
+
+@app.get("/v1/long-term-memory-events", response_model=list[LongTermMemoryEvent])
+def list_long_term_memory_events(user: dict = Depends(current_user)):
+    return store.list_long_term_memory_events(user["id"])
+
+
+@app.post("/v1/long-term-memories", response_model=LongTermMemory, status_code=201)
+def create_long_term_memory(payload: LongTermMemoryCreate, user: dict = Depends(current_user)):
+    key = (payload.kind, normalize_memory_text(payload.subject), normalize_memory_text(payload.content))
+    if any(
+        (item["kind"], normalize_memory_text(item["subject"]), normalize_memory_text(item["content"])) == key
+        for item in store.list_long_term_memories(user["id"])
+    ):
+        raise HTTPException(status.HTTP_409_CONFLICT, detail={
+            "message": "相同长期记忆已经存在", "code": "LONG_TERM_MEMORY_DUPLICATE",
+        })
+    vector, model = _long_term_embedding(payload.subject, payload.content)
+    memory, _ = store.create_long_term_memory(
+        user["id"], kind=payload.kind, subject=payload.subject, content=payload.content,
+        status="active", confidence=1.0, origin="manual", reason="用户在知识中枢手动添加",
+        source_channel="manual", embedding=vector, embedding_model=model,
+    )
+    return memory
+
+
+@app.post("/v1/long-term-memories/extract-history", response_model=list[LongTermMemory])
+def extract_long_term_memories_from_history(
+    payload: LongTermMemoryHistoryRequest, user: dict = Depends(current_user),
+):
+    pairs: list[tuple[str, dict, dict]] = []
+    if payload.channel in {"all", "chat"}:
+        for session in store.list_chat_sessions(user["id"]):
+            messages = store.list_chat_messages(user["id"], session["id"]) or []
+            for index, message in enumerate(messages[:-1]):
+                following = messages[index + 1]
+                if message["role"] == "user" and following["role"] == "assistant" and following["status"] == "completed":
+                    pairs.append(("chat", message, following))
+    if payload.channel in {"all", "research"}:
+        for session in store.list_research_sessions(user["id"]):
+            messages = store.list_research_messages(user["id"], session["id"]) or []
+            for index, message in enumerate(messages[:-1]):
+                following = messages[index + 1]
+                if message["role"] == "user" and following["role"] == "assistant" and following["status"] == "completed":
+                    pairs.append(("research", message, following))
+    created: list[dict] = []
+    for channel, user_message, assistant_message in pairs[-50:]:
+        result = infer_and_store_long_term_memories(
+            ai, store, user["id"], user_content=user_message["content"],
+            assistant_content=assistant_message["content"], recent_context=[],
+            source_channel="history", source_session_id=user_message["session_id"],
+            source_message_id=user_message["id"], allow_implicit=True,
+        )
+        created.extend(result["candidates"])
+        created.extend(
+            mutation["memory"] for mutation in result["mutations"] if mutation.get("memory")
+        )
+    return created
+
+
+@app.patch("/v1/long-term-memories/{memory_id}", response_model=LongTermMemory)
+def update_long_term_memory(
+    memory_id: str, payload: LongTermMemoryUpdate, user: dict = Depends(current_user),
+):
+    current = store.get_long_term_memory(user["id"], memory_id)
+    if not current:
+        raise HTTPException(404, "Long-term memory not found")
+    changes = payload.model_dump(exclude_none=True)
+    subject = changes.get("subject", current["subject"])
+    content = changes.get("content", current["content"])
+    kind = changes.get("kind", current["kind"])
+    key = (kind, normalize_memory_text(subject), normalize_memory_text(content))
+    if any(
+        item["id"] != memory_id
+        and (item["kind"], normalize_memory_text(item["subject"]), normalize_memory_text(item["content"])) == key
+        for item in store.list_long_term_memories(user["id"])
+    ):
+        raise HTTPException(status.HTTP_409_CONFLICT, detail={
+            "message": "相同长期记忆已经存在", "code": "LONG_TERM_MEMORY_DUPLICATE",
+        })
+    if "subject" in changes or "content" in changes:
+        vector, model = _long_term_embedding(subject, content)
+        changes.update(
+            embedding=vector, embedding_model=model,
+            embedding_status="ready" if vector is not None else "failed",
+        )
+    if changes.get("status") == "active" and current.get("conflict_memory_id"):
+        store.delete_long_term_memory(user["id"], current["conflict_memory_id"])
+    memory, _ = store.update_long_term_memory(user["id"], memory_id, **changes)
+    if not memory or memory["status"] == "pending_delete":
+        raise HTTPException(404, "Long-term memory not found")
+    return memory
+
+
+@app.delete("/v1/long-term-memories/{memory_id}", response_model=LongTermMemoryMutation)
+def delete_long_term_memory(memory_id: str, user: dict = Depends(current_user)):
+    mutation = store.delete_long_term_memory(user["id"], memory_id)
+    if not mutation:
+        raise HTTPException(404, "Long-term memory not found")
+    return mutation
+
+
+@app.post(
+    "/v1/long-term-memory-mutations/{mutation_id}/undo",
+    response_model=LongTermMemoryMutation,
+)
+def undo_long_term_memory_mutation(mutation_id: str, user: dict = Depends(current_user)):
+    mutation = store.undo_long_term_memory_mutation(user["id"], mutation_id)
+    if not mutation:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail={
+            "message": "撤销窗口已过期或操作不存在", "code": "LONG_TERM_MEMORY_UNDO_UNAVAILABLE",
+        })
+    return mutation
 
 
 @app.post("/v1/memories", response_model=Memory, status_code=201)

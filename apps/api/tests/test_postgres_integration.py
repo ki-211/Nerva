@@ -32,13 +32,14 @@ class PostgreSQLMigrationIntegrationTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def test_real_array_and_0010_through_0013_migrations(self):
+    def test_real_array_and_0010_through_0014_migrations(self):
         self.alembic("downgrade", "base")
         self.alembic("upgrade", "0009")
         self.alembic("upgrade", "0010")
         self.alembic("upgrade", "0011")
         self.alembic("upgrade", "0012")
         self.alembic("upgrade", "0013")
+        self.alembic("upgrade", "0014")
 
         engine = create_engine(self.database_url)
         try:
@@ -48,8 +49,9 @@ class PostgreSQLMigrationIntegrationTest(unittest.TestCase):
             self.assertIn("audit_events", inspector.get_table_names())
             self.assertIn("research_sessions", inspector.get_table_names())
             self.assertIn("research_messages", inspector.get_table_names())
+            self.assertIn("knowledge_hub_settings", inspector.get_table_names())
             with engine.connect() as connection:
-                self.assertEqual(connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one(), "0013")
+                self.assertEqual(connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one(), "0014")
         finally:
             engine.dispose()
 

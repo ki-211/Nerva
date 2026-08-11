@@ -1,0 +1,18 @@
+.memory-disclosure { margin-top: 12px; font-size: 12px; }
+.memory-disclosure button { cursor: pointer; }
+.memory-disclosure-toggle { padding: 7px 10px; color: #286548; border: 1px solid #cce2d5; border-radius: 9px; background: #f1f9f4; }
+.memory-disclosure-toggle span { margin-left: 6px; color: #718078; }
+.memory-disclosure-panel, .memory-suggestions { display: grid; gap: 8px; margin-top: 8px; padding: 10px; border: 1px solid #dce7e1; border-radius: 10px; background: #fbfdfc; }
+.memory-disclosure-item { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.memory-disclosure-item div { min-width: 0; }
+.memory-disclosure-item small, .memory-suggestions small { margin-right: 6px; color: #347255; font-weight: 700; }
+.memory-disclosure-item b { color: #293c33; }
+.memory-disclosure-item p { margin: 3px 0 0; color: #63726b; line-height: 1.5; }
+.memory-disclosure-item > span, .memory-suggestions div > span:last-child { display: flex; flex: 0 0 auto; gap: 5px; }
+.memory-disclosure-item button, .memory-suggestions button, .memory-undo button { padding: 5px 8px; color: #426256; border: 1px solid #d5e1db; border-radius: 7px; background: white; }
+.memory-suggestions { border-color: #ead9a8; background: #fffaf0; }
+.memory-suggestions > div { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: #5e512d; }
+.memory-undo { margin-top: 8px; padding: 8px 10px; color: #286548; border-radius: 8px; background: #edf8f1; }
+.memory-undo button { margin-left: 8px; }
+.memory-disclosure-missing, .memory-disclosure-error { margin: 0; color: #8a665e; }
+@media (max-width: 620px) { .memory-disclosure-item, .memory-suggestions > div { flex-direction: column; } }

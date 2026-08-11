@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Iterable
 
 
-MACHINE_SCHEMA_VERSION = "nerva-export-v1"
+MACHINE_SCHEMA_VERSION = "nerva-export-v2"
 HUMAN_SCHEMA_VERSION = "nerva-human-markdown-v1"
 
 
@@ -43,6 +43,18 @@ _FIELDS = {
     "knowledge_events": (
         "id", "change_set_id", "created_at", "title", "summary", "affected_documents",
         "accepted_count", "rejected_count", "origin",
+    ),
+    "collaboration_preferences": (
+        "id", "kind", "content", "scope", "scope_ref", "status", "confidence",
+        "origin", "use_count", "last_used_at", "created_at", "updated_at",
+    ),
+    "long_term_memories": (
+        "id", "kind", "subject", "content", "status", "confidence", "origin", "reason",
+        "source_channel", "source_session_id", "source_message_id", "conflict_memory_id",
+        "use_count", "last_used_at", "created_at", "updated_at",
+    ),
+    "knowledge_hub_settings": (
+        "personalization_enabled", "auto_learning_enabled", "long_term_memory_enabled",
     ),
 }
 
@@ -161,7 +173,8 @@ def _project_rows(snapshot: dict[str, list[dict]], *, scope: str) -> dict[str, l
 
 def _machine_readme() -> str:
     fields = "\n".join(
-        f"- `{name}.jsonl`: " + ", ".join(f"`{field}`" for field in allowed)
+        f"- `{'knowledge_hub_settings.json' if name == 'knowledge_hub_settings' else f'{name}.jsonl'}`: "
+        + ", ".join(f"`{field}`" for field in allowed)
         for name, allowed in _FIELDS.items()
     )
     return (
@@ -197,7 +210,10 @@ def build_knowledge_archive(
                 archive.writestr(internal_path, render_single_markdown(document))
                 markdown_files.append({"document_id": document["id"], "path": internal_path})
             for name, rows in projected.items():
-                archive.writestr(f"{name}.jsonl", _jsonl(rows))
+                if name == "knowledge_hub_settings":
+                    archive.writestr("knowledge_hub_settings.json", _json_text(rows[0] if rows else {}, pretty=True))
+                else:
+                    archive.writestr(f"{name}.jsonl", _jsonl(rows))
             manifest = {
                 "schema_version": MACHINE_SCHEMA_VERSION,
                 "exported_at": datetime.now(timezone.utc),
@@ -210,6 +226,8 @@ def build_knowledge_archive(
                     "contains_sessions": False,
                     "contains_original_images": False,
                     "image_sources_contain_ocr_text_only": True,
+                    "contains_personal_memory": bool(projected["long_term_memories"]),
+                    "contains_collaboration_preferences": bool(projected["collaboration_preferences"]),
                 },
             }
             archive.writestr("manifest.json", _json_text(manifest, pretty=True))

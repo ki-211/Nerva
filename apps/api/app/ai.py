@@ -16,6 +16,7 @@ from .prompts import (
     OCR_IMAGE_PROMPT, OCR_PROMPT_VERSION,
     PLAN_MERGE_PROMPT, MERGE_PROMPT_VERSION,
     EXTRACT_MEMORY_PROMPT, MEMORY_PROMPT_VERSION,
+    EXTRACT_LONG_TERM_MEMORY_PROMPT, LONG_TERM_MEMORY_PROMPT_VERSION,
     RESEARCH_PROMPT, RESEARCH_PROMPT_VERSION,
 )
 from .settings import settings
@@ -221,7 +222,11 @@ class AIAdapter(Protocol):
     def stream_chat(
         self, history: list[dict], sources: list[dict], *, memory_block: str = "",
     ): ...
-    def stream_research(self, history: list[dict], mode: str): ...
+    def stream_research(self, history: list[dict], mode: str, *, memory_block: str = ""): ...
+    def infer_long_term_memories(
+        self, *, user_content: str, assistant_content: str, recent_context: list[dict],
+        existing_memories: list[dict], explicit_command: bool,
+    ): ...
 
     def embed(self, texts: list[str]) -> list[list[float]]: ...
     def rerank(self, query: str, candidates: list[dict]) -> list[dict]: ...
@@ -471,6 +476,21 @@ class LocalDemoAI:
         from .schemas import MemoryInferenceResult
         return MemoryInferenceResult(memories=[])
 
+    def infer_long_term_memories(
+        self, *, user_content: str, assistant_content: str, recent_context: list[dict],
+        existing_memories: list[dict], explicit_command: bool,
+    ):
+        from .schemas import InferredLongTermMemory, LongTermMemoryInferenceResult
+        if not explicit_command or not re.search(r"记住|请记下|以后要记得", user_content):
+            return LongTermMemoryInferenceResult(memories=[])
+        content = re.sub(r"^(?:请)?(?:帮我)?(?:记住|记下)[：,:，\s]*", "", user_content).strip()
+        if not content:
+            return LongTermMemoryInferenceResult(memories=[])
+        return LongTermMemoryInferenceResult(memories=[InferredLongTermMemory(
+            action="remember", kind="fact", subject=content[:80], content=content,
+            confidence=0.95, reason="用户明确要求记住", target_memory_id=None, explicit=True,
+        )])
+
     def stream_chat(
         self, history: list[dict], sources: list[dict], *, memory_block: str = "",
     ):
@@ -481,7 +501,7 @@ class LocalDemoAI:
         for start in range(0, len(answer), 12):
             yield answer[start:start + 12]
 
-    def stream_research(self, history: list[dict], mode: str):
+    def stream_research(self, history: list[dict], mode: str, *, memory_block: str = ""):
         if mode == "web":
             raise AIProviderError(
                 "RESEARCH_WEB_UNAVAILABLE", "本地演示 Provider 不支持联网检索",
@@ -755,6 +775,26 @@ class BailianAI:
         except ValidationError as exc:
             raise AIProviderError("AI_SCHEMA_ERROR", "偏好推断结果未通过结构校验", retryable=True) from exc
 
+    def infer_long_term_memories(
+        self, *, user_content: str, assistant_content: str, recent_context: list[dict],
+        existing_memories: list[dict], explicit_command: bool,
+    ):
+        from .schemas import LongTermMemoryInferenceResult
+        raw = self._chat(
+            EXTRACT_LONG_TERM_MEMORY_PROMPT,
+            {
+                "task": "infer_long_term_memories", "user_content": user_content,
+                "assistant_content": assistant_content, "recent_context": recent_context,
+                "existing_memories": existing_memories, "explicit_command": explicit_command,
+                "output_schema": LongTermMemoryInferenceResult.model_json_schema(),
+            },
+            LONG_TERM_MEMORY_PROMPT_VERSION,
+        )
+        try:
+            return LongTermMemoryInferenceResult.model_validate(raw)
+        except ValidationError as exc:
+            raise AIProviderError("AI_SCHEMA_ERROR", "长期记忆提取结果未通过结构校验", retryable=True) from exc
+
     def stream_chat(
         self, history: list[dict], sources: list[dict], *, memory_block: str = "",
     ):
@@ -826,7 +866,7 @@ class BailianAI:
             "completion_tokens": (usage or {}).get("completion_tokens"),
         })
 
-    def stream_research(self, history: list[dict], mode: str):
+    def stream_research(self, history: list[dict], mode: str, *, memory_block: str = ""):
         started = time.perf_counter()
         emitted = False
         completed = False
@@ -837,7 +877,7 @@ class BailianAI:
         body = {
             "model": self.research_model,
             "input": [
-                {"role": "system", "content": RESEARCH_PROMPT},
+                {"role": "system", "content": f"{RESEARCH_PROMPT}\n\n{memory_block}" if memory_block else RESEARCH_PROMPT},
                 *[
                     {"role": item["role"], "content": item["content"]}
                     for item in history[-20:]

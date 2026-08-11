@@ -274,6 +274,16 @@ user_memories = Table(
     CheckConstraint("use_count >= 0", name="ck_memories_use_count"),
 )
 
+knowledge_hub_settings = Table(
+    "knowledge_hub_settings", metadata,
+    Column("user_id", String(40), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True),
+    Column("personalization_enabled", Boolean, nullable=False, server_default="1"),
+    Column("auto_learning_enabled", Boolean, nullable=False, server_default="1"),
+    Column("long_term_memory_enabled", Boolean, nullable=False, server_default="1"),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+)
+
 chat_sessions = Table(
     "chat_sessions", metadata,
     Column("id", String(40), primary_key=True),
@@ -295,6 +305,7 @@ chat_messages = Table(
     Column("model", String(160)),
     Column("grounding", String(30)),
     Column("citations", JSON().with_variant(JSONB, "postgresql"), nullable=False),
+    Column("memory_refs", JSON().with_variant(JSONB, "postgresql"), nullable=False, server_default="[]"),
     Column("error_code", String(80)),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("completed_at", DateTime(timezone=True)),
@@ -330,6 +341,7 @@ research_messages = Table(
     Column("basis", String(20)),
     Column("model", String(160)),
     Column("citations", JSON().with_variant(JSONB, "postgresql"), nullable=False),
+    Column("memory_refs", JSON().with_variant(JSONB, "postgresql"), nullable=False, server_default="[]"),
     Column("error_code", String(80)),
     Column("ingestion_source_id", String(40), ForeignKey("sources.id", ondelete="SET NULL"), unique=True),
     Column("created_at", DateTime(timezone=True), nullable=False),
@@ -344,6 +356,65 @@ research_messages = Table(
         name="ck_research_messages_requested_mode",
     ),
     CheckConstraint("basis IS NULL OR basis IN ('web', 'ai')", name="ck_research_messages_basis"),
+)
+
+long_term_memories = Table(
+    "long_term_memories", metadata,
+    Column("id", String(40), primary_key=True),
+    Column("user_id", String(40), ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+    Column("kind", String(20), nullable=False),
+    Column("subject", String(160), nullable=False),
+    Column("content", Text, nullable=False),
+    Column("status", String(24), nullable=False),
+    Column("confidence", Float, nullable=False, server_default="1.0"),
+    Column("origin", String(20), nullable=False),
+    Column("reason", Text),
+    Column("source_channel", String(20), nullable=False),
+    Column("source_session_id", String(40)),
+    Column("source_message_id", String(40)),
+    Column("conflict_memory_id", String(40), ForeignKey("long_term_memories.id", ondelete="SET NULL")),
+    Column("embedding", EmbeddingVector),
+    Column("embedding_model", String(160)),
+    Column("embedding_status", String(20), nullable=False, server_default="pending"),
+    Column("use_count", Integer, nullable=False, server_default="0"),
+    Column("last_used_at", DateTime(timezone=True)),
+    Column("undo_expires_at", DateTime(timezone=True)),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    CheckConstraint("kind IN ('person', 'project', 'decision', 'fact')", name="ck_long_term_memories_kind"),
+    CheckConstraint("status IN ('active', 'candidate', 'suppressed', 'pending_delete')", name="ck_long_term_memories_status"),
+    CheckConstraint("origin IN ('user_explicit', 'ai_inferred', 'manual')", name="ck_long_term_memories_origin"),
+    CheckConstraint("source_channel IN ('chat', 'research', 'manual', 'history')", name="ck_long_term_memories_source"),
+    CheckConstraint("embedding_status IN ('pending', 'ready', 'failed')", name="ck_long_term_memories_embedding_status"),
+    CheckConstraint("confidence BETWEEN 0 AND 1", name="ck_long_term_memories_confidence"),
+    CheckConstraint("use_count >= 0", name="ck_long_term_memories_use_count"),
+)
+
+long_term_memory_mutations = Table(
+    "long_term_memory_mutations", metadata,
+    Column("id", String(40), primary_key=True),
+    Column("user_id", String(40), ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+    Column("memory_id", String(40), nullable=False),
+    Column("action", String(20), nullable=False),
+    Column("before_state", JSON().with_variant(JSONB, "postgresql"), nullable=False),
+    Column("after_state", JSON().with_variant(JSONB, "postgresql"), nullable=False),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    Column("undone_at", DateTime(timezone=True)),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    CheckConstraint("action IN ('create', 'update', 'delete')", name="ck_long_term_memory_mutations_action"),
+)
+
+long_term_memory_events = Table(
+    "long_term_memory_events", metadata,
+    Column("id", String(40), primary_key=True),
+    Column("user_id", String(40), ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+    Column("memory_id", String(40), ForeignKey("long_term_memories.id", ondelete="SET NULL")),
+    Column("action", String(30), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    CheckConstraint(
+        "action IN ('candidate_created', 'remembered', 'confirmed', 'ignored', 'corrected', 'forgotten', 'undo')",
+        name="ck_long_term_memory_events_action",
+    ),
 )
 
 knowledge_events = Table(
@@ -401,6 +472,10 @@ Index("idx_knowledge_events_created_at", knowledge_events.c.created_at.desc())
 Index("idx_knowledge_events_user_created", knowledge_events.c.user_id, knowledge_events.c.created_at.desc())
 Index("idx_memories_user_active", user_memories.c.user_id, user_memories.c.status, user_memories.c.kind)
 Index("idx_memories_user_created", user_memories.c.user_id, user_memories.c.created_at)
+Index("idx_long_term_memories_user_status", long_term_memories.c.user_id, long_term_memories.c.status, long_term_memories.c.kind)
+Index("idx_long_term_memories_user_updated", long_term_memories.c.user_id, long_term_memories.c.updated_at)
+Index("idx_long_term_memory_mutations_user_expiry", long_term_memory_mutations.c.user_id, long_term_memory_mutations.c.expires_at)
+Index("idx_long_term_memory_events_user_created", long_term_memory_events.c.user_id, long_term_memory_events.c.created_at)
 Index("idx_chat_sessions_user_updated", chat_sessions.c.user_id, chat_sessions.c.updated_at)
 Index("idx_chat_messages_session_created", chat_messages.c.session_id, chat_messages.c.created_at)
 Index("idx_research_sessions_user_updated", research_sessions.c.user_id, research_sessions.c.updated_at)
@@ -911,6 +986,15 @@ class Store:
                     event_rows = [dict(row) for row in db.execute(select(knowledge_events).where(
                         knowledge_events.c.user_id == user_id,
                     ).order_by(knowledge_events.c.created_at, knowledge_events.c.id)).mappings()]
+                    preference_rows = [dict(row) for row in db.execute(select(user_memories).where(
+                        user_memories.c.user_id == user_id,
+                    ).order_by(user_memories.c.created_at, user_memories.c.id)).mappings()]
+                    long_term_memory_rows = [dict(row) for row in db.execute(select(long_term_memories).where(
+                        long_term_memories.c.user_id == user_id,
+                        long_term_memories.c.status != "pending_delete",
+                    ).order_by(long_term_memories.c.created_at, long_term_memories.c.id)).mappings()]
+                    hub_settings = self.get_knowledge_hub_settings(user_id)
+                    hub_settings_rows = [hub_settings]
                 else:
                     version_rows = [dict(row) for row in db.execute(select(document_versions).where(
                         document_versions.c.user_id == user_id,
@@ -938,6 +1022,9 @@ class Store:
                         knowledge_events.c.user_id == user_id,
                         knowledge_events.c.change_set_id.in_(set_ids),
                     ).order_by(knowledge_events.c.created_at, knowledge_events.c.id)).mappings()]
+                    preference_rows = []
+                    long_term_memory_rows = []
+                    hub_settings_rows = []
 
                 return {
                     "documents": document_rows,
@@ -947,6 +1034,9 @@ class Store:
                     "change_sets": set_rows,
                     "change_items": item_rows,
                     "knowledge_events": event_rows,
+                    "collaboration_preferences": preference_rows,
+                    "long_term_memories": long_term_memory_rows,
+                    "knowledge_hub_settings": hub_settings_rows,
                 }
 
     def create_source(self, user_id: str, kind: str, content: str, title: str | None) -> dict:
@@ -1513,6 +1603,312 @@ class Store:
             rows = db.execute(query.order_by(user_memories.c.created_at.desc())).mappings()
             return [dict(row) for row in rows]
 
+    def get_knowledge_hub_settings(self, user_id: str) -> dict:
+        with self.engine.connect() as db:
+            row = db.execute(select(knowledge_hub_settings).where(
+                knowledge_hub_settings.c.user_id == user_id,
+            )).mappings().first()
+        if not row:
+            return {
+                "personalization_enabled": True,
+                "auto_learning_enabled": True,
+                "long_term_memory_enabled": True,
+            }
+        return {
+            "personalization_enabled": bool(row["personalization_enabled"]),
+            "auto_learning_enabled": bool(row["auto_learning_enabled"]),
+            "long_term_memory_enabled": bool(row["long_term_memory_enabled"]),
+        }
+
+    def update_knowledge_hub_settings(
+        self, user_id: str, *, personalization_enabled: bool | None = None,
+        auto_learning_enabled: bool | None = None,
+        long_term_memory_enabled: bool | None = None,
+    ) -> dict:
+        changed_at = now_utc()
+        updates: dict[str, object] = {"updated_at": changed_at}
+        if personalization_enabled is not None:
+            updates["personalization_enabled"] = personalization_enabled
+        if auto_learning_enabled is not None:
+            updates["auto_learning_enabled"] = auto_learning_enabled
+        if long_term_memory_enabled is not None:
+            updates["long_term_memory_enabled"] = long_term_memory_enabled
+        with self.engine.begin() as db:
+            exists = db.execute(select(knowledge_hub_settings.c.user_id).where(
+                knowledge_hub_settings.c.user_id == user_id,
+            )).first()
+            if exists:
+                db.execute(update(knowledge_hub_settings).where(
+                    knowledge_hub_settings.c.user_id == user_id,
+                ).values(**updates))
+            else:
+                db.execute(insert(knowledge_hub_settings).values(
+                    user_id=user_id,
+                    personalization_enabled=(
+                        personalization_enabled if personalization_enabled is not None else True
+                    ),
+                    auto_learning_enabled=(
+                        auto_learning_enabled if auto_learning_enabled is not None else True
+                    ),
+                    long_term_memory_enabled=(
+                        long_term_memory_enabled if long_term_memory_enabled is not None else True
+                    ),
+                    created_at=changed_at,
+                    updated_at=changed_at,
+                ))
+        return self.get_knowledge_hub_settings(user_id)
+
+    @staticmethod
+    def _long_term_memory_snapshot(memory: dict | None) -> dict:
+        if not memory:
+            return {}
+        fields = (
+            "kind", "subject", "content", "status", "confidence", "origin", "reason",
+            "source_channel", "source_session_id", "source_message_id", "conflict_memory_id",
+            "embedding", "embedding_model", "embedding_status", "use_count", "last_used_at",
+        )
+        snapshot = {field: memory.get(field) for field in fields}
+        if isinstance(snapshot.get("last_used_at"), datetime):
+            snapshot["last_used_at"] = snapshot["last_used_at"].isoformat()
+        return snapshot
+
+    @staticmethod
+    def _restore_long_term_snapshot(snapshot: dict) -> dict:
+        restored = dict(snapshot)
+        if isinstance(restored.get("last_used_at"), str):
+            restored["last_used_at"] = datetime.fromisoformat(restored["last_used_at"])
+        return restored
+
+    def cleanup_expired_long_term_mutations(self) -> int:
+        cutoff = now_utc()
+        cleaned = 0
+        with self.engine.begin() as db:
+            rows = list(db.execute(select(long_term_memory_mutations).where(
+                long_term_memory_mutations.c.expires_at <= cutoff,
+                long_term_memory_mutations.c.undone_at.is_(None),
+            )).mappings())
+            for row in rows:
+                if row["action"] == "delete":
+                    db.execute(delete(long_term_memories).where(
+                        long_term_memories.c.id == row["memory_id"],
+                        long_term_memories.c.user_id == row["user_id"],
+                        long_term_memories.c.status == "pending_delete",
+                    ))
+                db.execute(update(long_term_memory_mutations).where(
+                    long_term_memory_mutations.c.id == row["id"],
+                ).values(before_state={}, after_state={}))
+                cleaned += 1
+        return cleaned
+
+    def list_long_term_memories(
+        self, user_id: str, *, status: str | None = None, kind: str | None = None,
+        query: str | None = None, include_hidden: bool = False,
+    ) -> list[dict]:
+        self.cleanup_expired_long_term_mutations()
+        statement = select(long_term_memories).where(long_term_memories.c.user_id == user_id)
+        if include_hidden:
+            if status:
+                statement = statement.where(long_term_memories.c.status == status)
+        else:
+            statement = statement.where(long_term_memories.c.status != "pending_delete")
+            if status:
+                statement = statement.where(long_term_memories.c.status == status)
+        if kind:
+            statement = statement.where(long_term_memories.c.kind == kind)
+        normalized_query = (query or "").strip().casefold()
+        with self.engine.connect() as db:
+            rows = [dict(row) for row in db.execute(
+                statement.order_by(long_term_memories.c.updated_at.desc(), long_term_memories.c.id)
+            ).mappings()]
+        if normalized_query:
+            rows = [row for row in rows if normalized_query in f"{row['subject']} {row['content']}".casefold()]
+        return rows
+
+    def list_long_term_memory_events(self, user_id: str, *, limit: int = 500) -> list[dict]:
+        with self.engine.connect() as db:
+            rows = db.execute(select(long_term_memory_events).where(
+                long_term_memory_events.c.user_id == user_id,
+            ).order_by(
+                long_term_memory_events.c.created_at.desc(), long_term_memory_events.c.id.desc(),
+            ).limit(limit)).mappings()
+            return [dict(row) for row in rows]
+
+    def get_long_term_memory(
+        self, user_id: str, memory_id: str, *, include_hidden: bool = False,
+    ) -> dict | None:
+        statement = select(long_term_memories).where(
+            long_term_memories.c.id == memory_id,
+            long_term_memories.c.user_id == user_id,
+        )
+        if not include_hidden:
+            statement = statement.where(long_term_memories.c.status != "pending_delete")
+        with self.engine.connect() as db:
+            row = db.execute(statement).mappings().first()
+            return dict(row) if row else None
+
+    def create_long_term_memory(
+        self, user_id: str, *, kind: str, subject: str, content: str, status: str,
+        confidence: float, origin: str, reason: str | None, source_channel: str,
+        source_session_id: str | None = None, source_message_id: str | None = None,
+        conflict_memory_id: str | None = None, embedding: list[float] | None = None,
+        embedding_model: str | None = None, record_mutation: bool = False,
+    ) -> tuple[dict, dict | None]:
+        memory_id = new_id("ltm")
+        created_at = now_utc()
+        values = dict(
+            id=memory_id, user_id=user_id, kind=kind, subject=subject, content=content,
+            status=status, confidence=confidence, origin=origin, reason=reason,
+            source_channel=source_channel, source_session_id=source_session_id,
+            source_message_id=source_message_id, conflict_memory_id=conflict_memory_id,
+            embedding=embedding, embedding_model=embedding_model,
+            embedding_status="ready" if embedding is not None else "failed",
+            use_count=0, last_used_at=None, undo_expires_at=None,
+            created_at=created_at, updated_at=created_at,
+        )
+        mutation = None
+        with self.engine.begin() as db:
+            db.execute(insert(long_term_memories).values(**values))
+            db.execute(insert(long_term_memory_events).values(
+                id=new_id("ltevt"), user_id=user_id, memory_id=memory_id,
+                action="remembered" if status == "active" else "candidate_created",
+                created_at=created_at,
+            ))
+            if record_mutation:
+                mutation_id = new_id("ltmut")
+                expires_at = created_at + timedelta(minutes=10)
+                db.execute(insert(long_term_memory_mutations).values(
+                    id=mutation_id, user_id=user_id, memory_id=memory_id, action="create",
+                    before_state={}, after_state=self._long_term_memory_snapshot(values),
+                    expires_at=expires_at, undone_at=None, created_at=created_at,
+                ))
+                mutation = {"id": mutation_id, "action": "create", "memory_id": memory_id,
+                            "expires_at": expires_at, "undone_at": None}
+        memory = self.get_long_term_memory(user_id, memory_id, include_hidden=True)
+        assert memory is not None
+        if mutation:
+            mutation["memory"] = memory
+        return memory, mutation
+
+    def update_long_term_memory(
+        self, user_id: str, memory_id: str, *, record_mutation: bool = True, **changes,
+    ) -> tuple[dict | None, dict | None]:
+        current = self.get_long_term_memory(user_id, memory_id, include_hidden=True)
+        if not current:
+            return None, None
+        allowed = {"kind", "subject", "content", "status", "confidence", "reason",
+                   "conflict_memory_id", "embedding", "embedding_model", "embedding_status"}
+        updates = {key: value for key, value in changes.items() if key in allowed}
+        updates["updated_at"] = now_utc()
+        if updates.get("status") == "active" and current["status"] == "candidate":
+            event_action = "confirmed"
+        elif updates.get("status") == "suppressed" and current["status"] == "candidate":
+            event_action = "ignored"
+        elif any(key in updates for key in ("kind", "subject", "content")):
+            event_action = "corrected"
+        else:
+            event_action = None
+        mutation = None
+        with self.engine.begin() as db:
+            db.execute(update(long_term_memories).where(
+                long_term_memories.c.id == memory_id,
+                long_term_memories.c.user_id == user_id,
+            ).values(**updates))
+            if event_action:
+                db.execute(insert(long_term_memory_events).values(
+                    id=new_id("ltevt"), user_id=user_id, memory_id=memory_id,
+                    action=event_action, created_at=updates["updated_at"],
+                ))
+            if record_mutation:
+                after = {**current, **updates}
+                mutation_id = new_id("ltmut")
+                expires_at = updates["updated_at"] + timedelta(minutes=10)
+                db.execute(insert(long_term_memory_mutations).values(
+                    id=mutation_id, user_id=user_id, memory_id=memory_id, action="update",
+                    before_state=self._long_term_memory_snapshot(current),
+                    after_state=self._long_term_memory_snapshot(after), expires_at=expires_at,
+                    undone_at=None, created_at=updates["updated_at"],
+                ))
+                mutation = {"id": mutation_id, "action": "update", "memory_id": memory_id,
+                            "expires_at": expires_at, "undone_at": None}
+        memory = self.get_long_term_memory(user_id, memory_id, include_hidden=True)
+        if mutation:
+            mutation["memory"] = memory if memory and memory["status"] != "pending_delete" else None
+        return memory, mutation
+
+    def delete_long_term_memory(self, user_id: str, memory_id: str) -> dict | None:
+        current = self.get_long_term_memory(user_id, memory_id)
+        if not current:
+            return None
+        changed_at = now_utc()
+        expires_at = changed_at + timedelta(minutes=10)
+        mutation_id = new_id("ltmut")
+        with self.engine.begin() as db:
+            db.execute(update(long_term_memories).where(
+                long_term_memories.c.id == memory_id,
+                long_term_memories.c.user_id == user_id,
+            ).values(status="pending_delete", undo_expires_at=expires_at, updated_at=changed_at))
+            db.execute(insert(long_term_memory_mutations).values(
+                id=mutation_id, user_id=user_id, memory_id=memory_id, action="delete",
+                before_state=self._long_term_memory_snapshot(current), after_state={},
+                expires_at=expires_at, undone_at=None, created_at=changed_at,
+            ))
+            db.execute(insert(long_term_memory_events).values(
+                id=new_id("ltevt"), user_id=user_id, memory_id=memory_id,
+                action="forgotten", created_at=changed_at,
+            ))
+        return {"id": mutation_id, "action": "delete", "memory_id": memory_id,
+                "memory": None, "expires_at": expires_at, "undone_at": None}
+
+    def undo_long_term_memory_mutation(self, user_id: str, mutation_id: str) -> dict | None:
+        now = now_utc()
+        with self.engine.begin() as db:
+            mutation = db.execute(select(long_term_memory_mutations).where(
+                long_term_memory_mutations.c.id == mutation_id,
+                long_term_memory_mutations.c.user_id == user_id,
+            ).with_for_update()).mappings().first()
+            expires_at = mutation["expires_at"] if mutation else None
+            if expires_at is not None and expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            if not mutation or mutation["undone_at"] is not None or expires_at <= now:
+                return None
+            memory_id = mutation["memory_id"]
+            if mutation["action"] == "create":
+                db.execute(delete(long_term_memories).where(
+                    long_term_memories.c.id == memory_id,
+                    long_term_memories.c.user_id == user_id,
+                ))
+            else:
+                restored = self._restore_long_term_snapshot(mutation["before_state"])
+                restored.update(updated_at=now, undo_expires_at=None)
+                db.execute(update(long_term_memories).where(
+                    long_term_memories.c.id == memory_id,
+                    long_term_memories.c.user_id == user_id,
+                ).values(**restored))
+            db.execute(update(long_term_memory_mutations).where(
+                long_term_memory_mutations.c.id == mutation_id,
+            ).values(undone_at=now, before_state={}, after_state={}))
+            db.execute(insert(long_term_memory_events).values(
+                id=new_id("ltevt"), user_id=user_id,
+                memory_id=None if mutation["action"] == "create" else mutation["memory_id"],
+                action="undo", created_at=now,
+            ))
+        memory = self.get_long_term_memory(user_id, mutation["memory_id"])
+        return {"id": mutation_id, "action": mutation["action"], "memory_id": mutation["memory_id"],
+                "memory": memory, "expires_at": mutation["expires_at"], "undone_at": now}
+
+    def increment_long_term_memory_usage(self, user_id: str, memory_ids: list[str]) -> None:
+        if not memory_ids:
+            return
+        with self.engine.begin() as db:
+            db.execute(update(long_term_memories).where(
+                long_term_memories.c.user_id == user_id,
+                long_term_memories.c.id.in_(set(memory_ids)),
+                long_term_memories.c.status == "active",
+            ).values(
+                use_count=long_term_memories.c.use_count + 1,
+                last_used_at=now_utc(),
+            ))
+
     def get_memory(self, user_id: str, memory_id: str) -> dict | None:
         with self.engine.connect() as db:
             row = db.execute(select(user_memories).where(
@@ -1685,14 +2081,14 @@ class Store:
                     "id": user_message_id, "user_id": user_id, "session_id": session_id,
                     "role": "user", "status": "completed", "content": content,
                     "include_public": include_public,
-                    "model": None, "grounding": None, "citations": [], "error_code": None,
+                    "model": None, "grounding": None, "citations": [], "memory_refs": [], "error_code": None,
                     "created_at": user_created_at, "completed_at": user_created_at,
                 },
                 {
                     "id": assistant_message_id, "user_id": user_id, "session_id": session_id,
                     "role": "assistant", "status": "generating", "content": "",
                     "include_public": include_public,
-                    "model": model, "grounding": None, "citations": [], "error_code": None,
+                    "model": model, "grounding": None, "citations": [], "memory_refs": [], "error_code": None,
                     "created_at": assistant_created_at, "completed_at": None,
                 },
             ])
@@ -1708,7 +2104,7 @@ class Store:
 
     def complete_chat_message(
         self, user_id: str, message_id: str, *, content: str,
-        grounding: str, citations: list[dict],
+        grounding: str, citations: list[dict], memory_refs: list[str] | None = None,
     ) -> dict | None:
         completed_at = now_utc()
         with self.engine.begin() as db:
@@ -1722,7 +2118,7 @@ class Store:
                 return None
             db.execute(update(chat_messages).where(chat_messages.c.id == message_id).values(
                 status="completed", content=content, grounding=grounding,
-                citations=citations, error_code=None, completed_at=completed_at,
+                citations=citations, memory_refs=memory_refs or [], error_code=None, completed_at=completed_at,
             ))
             db.execute(update(chat_sessions).where(chat_sessions.c.id == row.session_id).values(
                 updated_at=completed_at,
@@ -1768,7 +2164,7 @@ class Store:
             if not user_message:
                 return None
             db.execute(update(chat_messages).where(chat_messages.c.id == message_id).values(
-                status="generating", content="", grounding=None, citations=[],
+                status="generating", content="", grounding=None, citations=[], memory_refs=[],
                 error_code=None, completed_at=None,
             ))
         retried = self.get_chat_message(user_id, message_id)
@@ -1892,14 +2288,14 @@ class Store:
                 {
                     "id": user_message_id, "user_id": user_id, "session_id": session_id,
                     "role": "user", "status": "completed", "content": content,
-                    "requested_mode": None, "basis": None, "model": None, "citations": [],
+                    "requested_mode": None, "basis": None, "model": None, "citations": [], "memory_refs": [],
                     "error_code": None, "ingestion_source_id": None,
                     "created_at": user_created_at, "completed_at": user_created_at,
                 },
                 {
                     "id": assistant_message_id, "user_id": user_id, "session_id": session_id,
                     "role": "assistant", "status": "generating", "content": "",
-                    "requested_mode": mode, "basis": None, "model": model, "citations": [],
+                    "requested_mode": mode, "basis": None, "model": model, "citations": [], "memory_refs": [],
                     "error_code": None, "ingestion_source_id": None,
                     "created_at": assistant_created_at, "completed_at": None,
                 },
@@ -1918,7 +2314,7 @@ class Store:
 
     def complete_research_message(
         self, user_id: str, message_id: str, *, content: str, basis: str,
-        citations: list[dict],
+        citations: list[dict], memory_refs: list[str] | None = None,
     ) -> dict | None:
         completed_at = now_utc()
         with self.engine.begin() as db:
@@ -1934,6 +2330,7 @@ class Store:
                 research_messages.c.id == message_id,
             ).values(
                 status="completed", content=content, basis=basis, citations=citations,
+                memory_refs=memory_refs or [],
                 error_code=None, completed_at=completed_at,
             ))
             db.execute(update(research_sessions).where(
@@ -1989,7 +2386,7 @@ class Store:
                 research_messages.c.id == message_id,
             ).values(
                 status="generating", content="", requested_mode=mode or assistant["requested_mode"],
-                basis=None, citations=[], error_code=None, completed_at=None,
+                basis=None, citations=[], memory_refs=[], error_code=None, completed_at=None,
             ))
         retried = self.get_research_message(user_id, message_id)
         assert retried is not None

@@ -1,4 +1,4 @@
-import type { ChatMessage, ChatSession, ChatStreamHandlers, ChangeSet, Document, DocumentVersion, KnowledgeEvent, Memory, MemoryCreate, MemoryUpdate, ResearchMessage, ResearchMode, ResearchSession, ResearchStreamHandlers, SearchResponse, SourceProcessing, User } from './types';
+import type { ChatMessage, ChatSession, ChatStreamHandlers, ChangeSet, Document, DocumentVersion, KnowledgeEvent, KnowledgeHubSettings, KnowledgeHubSettingsUpdate, LongTermMemory, LongTermMemoryCreate, LongTermMemoryEvent, LongTermMemoryKind, LongTermMemoryMutation, LongTermMemoryStatus, LongTermMemoryUpdate, Memory, MemoryCreate, MemoryUpdate, ResearchMessage, ResearchMode, ResearchSession, ResearchStreamHandlers, SearchResponse, SourceProcessing, User } from './types';
 import { clientLogger } from './clientLogger';
 import { saveBlob } from './desktopRuntime';
 import {
@@ -51,18 +51,27 @@ type RequestPolicy = { loginSubmission?: boolean };
 
 export async function request<T>(path: string, init?: RequestInit, policy: RequestPolicy = {}): Promise<T> {
   const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  let timeout = 0;
+  const timeoutResponse = new Promise<Response>((_resolve, reject) => {
+    timeout = window.setTimeout(() => {
+      controller.abort();
+      reject(new DOMException('request timed out', 'AbortError'));
+    }, REQUEST_TIMEOUT_MS);
+  });
   init?.signal?.addEventListener('abort', () => controller.abort(), { once: true });
   const headers = requestHeaders(init?.headers);
   headers.set('Content-Type', 'application/json');
   let response: Response;
   try {
-    response = await apiTransport(`${BASE}${path}`, {
-      ...init,
-      signal: controller.signal,
-      credentials: 'include',
-      headers,
-    });
+    response = await Promise.race([
+      apiTransport(`${BASE}${path}`, {
+        ...init,
+        signal: controller.signal,
+        credentials: 'include',
+        headers,
+      }),
+      timeoutResponse,
+    ]);
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') {
       const mapped = networkError('API_TIMEOUT', '服务响应超时，请检查网络后重试');
@@ -219,6 +228,9 @@ async function streamChat(
     if (event === 'start') handlers.onStart(payload);
     if (event === 'delta') handlers.onDelta(payload.text || '');
     if (event === 'memory_candidates') handlers.onMemoryCandidates(payload.memories || []);
+    if (event === 'memory_context') handlers.onLongTermMemoryContext?.(payload.memories || []);
+    if (event === 'long_term_memory_candidates') handlers.onLongTermMemoryCandidates?.(payload.memories || []);
+    if (event === 'long_term_memory_mutation') handlers.onLongTermMemoryMutation?.(payload.mutation);
     if (event === 'done') {
       terminalEventReceived = true;
       handlers.onDone(payload.message);
@@ -305,6 +317,9 @@ async function streamResearch(
     if (event === 'start') handlers.onStart(payload);
     if (event === 'delta') handlers.onDelta(payload.text || '');
     if (event === 'sources') handlers.onSources(payload.citations || [], payload.basis || 'ai');
+    if (event === 'memory_context') handlers.onLongTermMemoryContext?.(payload.memories || []);
+    if (event === 'long_term_memory_candidates') handlers.onLongTermMemoryCandidates?.(payload.memories || []);
+    if (event === 'long_term_memory_mutation') handlers.onLongTermMemoryMutation?.(payload.mutation);
     if (event === 'done') { terminalEventReceived = true; handlers.onDone(payload.message); }
     if (event === 'error') {
       terminalEventReceived = true;
@@ -420,6 +435,11 @@ export const api = {
     return download(`/v1/exports/knowledge-package?${query}`, 'nerva-knowledge-package.zip');
   },
   events: () => request<KnowledgeEvent[]>('/v1/knowledge-events'),
+  knowledgeHubSettings: () => request<KnowledgeHubSettings>('/v1/knowledge-hub/settings'),
+  updateKnowledgeHubSettings: (payload: KnowledgeHubSettingsUpdate) =>
+    request<KnowledgeHubSettings>('/v1/knowledge-hub/settings', {
+      method: 'PATCH', body: JSON.stringify(payload),
+    }),
   memories: (status?: 'active' | 'candidate' | 'suppressed') => {
     const query = status ? `?status=${status}` : '';
     return request<Memory[]>(`/v1/memories${query}`);
@@ -431,6 +451,30 @@ export const api = {
     method: 'PATCH', body: JSON.stringify(payload),
   }),
   deleteMemory: (id: string) => request<void>(`/v1/memories/${id}`, { method: 'DELETE' }),
+  longTermMemories: (filters: { status?: LongTermMemoryStatus; kind?: LongTermMemoryKind; q?: string } = {}) => {
+    const query = new URLSearchParams();
+    if (filters.status) query.set('status', filters.status);
+    if (filters.kind) query.set('kind', filters.kind);
+    if (filters.q?.trim()) query.set('q', filters.q.trim());
+    const suffix = query.size ? `?${query}` : '';
+    return request<LongTermMemory[]>(`/v1/long-term-memories${suffix}`);
+  },
+  longTermMemoryEvents: () => request<LongTermMemoryEvent[]>('/v1/long-term-memory-events'),
+  createLongTermMemory: (payload: LongTermMemoryCreate) => request<LongTermMemory>('/v1/long-term-memories', {
+    method: 'POST', body: JSON.stringify(payload),
+  }),
+  updateLongTermMemory: (id: string, payload: LongTermMemoryUpdate) => request<LongTermMemory>(`/v1/long-term-memories/${id}`, {
+    method: 'PATCH', body: JSON.stringify(payload),
+  }),
+  deleteLongTermMemory: (id: string) => request<LongTermMemoryMutation>(`/v1/long-term-memories/${id}`, {
+    method: 'DELETE',
+  }),
+  undoLongTermMemoryMutation: (id: string) => request<LongTermMemoryMutation>(`/v1/long-term-memory-mutations/${id}/undo`, {
+    method: 'POST',
+  }),
+  extractLongTermMemoryHistory: (channel: 'all' | 'chat' | 'research' = 'all') => request<LongTermMemory[]>('/v1/long-term-memories/extract-history', {
+    method: 'POST', body: JSON.stringify({ channel }),
+  }),
   chatSessions: () => request<ChatSession[]>('/v1/chat/sessions'),
   createChatSession: (title = '新对话') => request<ChatSession>('/v1/chat/sessions', {
     method: 'POST', body: JSON.stringify({ title }),

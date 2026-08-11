@@ -30,8 +30,8 @@ export function AppShell({
     ? 'chat'
     : location.pathname.startsWith('/growth')
     ? 'growth'
-    : location.pathname.startsWith('/memories')
-    ? 'memories'
+    : location.pathname.startsWith('/knowledge-hub') || location.pathname.startsWith('/memories')
+    ? 'knowledge-hub'
     : 'capture';
 
   const go = useCallback(
@@ -74,8 +74,8 @@ export function AppShell({
           <button className={view === 'growth' ? 'active' : ''} onClick={() => go('/growth')}>
             ↗ 成长日志 <em>{eventCount}</em>
           </button>
-          <button className={view === 'memories' ? 'active' : ''} onClick={() => go('/memories')}>
-            ✦ 个性化偏好
+          <button className={view === 'knowledge-hub' ? 'active' : ''} onClick={() => go('/knowledge-hub')}>
+            ✦ 知识中枢
           </button>
           {user.role === 'admin' && <button className={view === 'admin' ? 'active' : ''} onClick={() => go('/admin')}>
             ⚙ 管理员控制台

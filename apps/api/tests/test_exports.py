@@ -113,7 +113,11 @@ class ExportApiTest(unittest.TestCase):
         with self.open_zip(empty_ai) as archive:
             manifest = json.loads(archive.read("manifest.json"))
             self.assertEqual(manifest["schema_version"], MACHINE_SCHEMA_VERSION)
-            self.assertTrue(all(count == 0 for count in manifest["counts"].values()))
+            self.assertEqual(manifest["counts"]["knowledge_hub_settings"], 1)
+            self.assertTrue(all(
+                count == 0 for name, count in manifest["counts"].items()
+                if name != "knowledge_hub_settings"
+            ))
             for name in (
                 "documents", "document_versions", "sources", "knowledge_units",
                 "change_sets", "change_items", "knowledge_events",
@@ -137,6 +141,15 @@ class ExportApiTest(unittest.TestCase):
     def test_ai_package_full_and_single_lineage_exclude_sensitive_and_other_document_content(self):
         first = self.create_document("First", "FIRST_PRIVATE_KNOWLEDGE")
         second = self.create_document("Second", "SECOND_MUST_NOT_LEAK")
+        main.store.create_memory(
+            self.user_id, kind="style", content="回答保持简洁", scope="global",
+            scope_ref=None, status="active", confidence=1, origin="user_explicit",
+        )
+        main.store.create_long_term_memory(
+            self.user_id, kind="project", subject="Nerva 项目", content="用户负责产品设计",
+            status="active", confidence=1, origin="manual", reason=None,
+            source_channel="manual", embedding=[0.0] * 1024, embedding_model="test",
+        )
         main.store.update_document(
             self.user_id, first["id"], title="First Renamed",
             markdown="# First Renamed\n\nFIRST_EDITED", base_version=1, reason="manual history",
@@ -174,9 +187,15 @@ class ExportApiTest(unittest.TestCase):
         with self.open_zip(full) as archive:
             manifest = json.loads(archive.read("manifest.json"))
             self.assertEqual(manifest["counts"]["documents"], 2)
+            self.assertTrue(manifest["privacy"]["contains_personal_memory"])
+            self.assertEqual(len(self.read_jsonl(archive, "long_term_memories.jsonl")), 1)
+            self.assertEqual(len(self.read_jsonl(archive, "collaboration_preferences.jsonl")), 1)
+            settings = json.loads(archive.read("knowledge_hub_settings.json"))
+            self.assertTrue(settings["long_term_memory_enabled"])
             contents = "\n".join(archive.read(name).decode("utf-8") for name in archive.namelist())
             self.assertIn("FIRST_EDITED", contents)
             self.assertIn("SECOND_MUST_NOT_LEAK", contents)
+            self.assertNotIn('"embedding"', contents)
 
     def test_exports_require_authentication(self):
         self.client.post("/v1/auth/logout")

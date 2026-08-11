@@ -9,7 +9,7 @@ import { AuthPage } from './features/auth/AuthPage';
 import { AppShell } from './app/AppShell';
 import { CaptureView } from './features/capture/CaptureView';
 import { LibraryView, GrowthView } from './features/documents/knowledgeViews';
-import { MemoriesPage } from './features/memories/MemoriesPage';
+import { KnowledgeHubPage } from './features/knowledge-hub/KnowledgeHubPage';
 import { ChatPage } from './features/chat/ChatPage';
 import { SearchPage } from './features/search/SearchPage';
 import { ResearchPage } from './features/research/ResearchPage';
@@ -134,8 +134,8 @@ function KnowledgeApp({ user, onSignedOut }: { user: User; onSignedOut: () => vo
     ? 'chat'
     : location.pathname.startsWith('/growth')
     ? 'growth'
-    : location.pathname.startsWith('/memories')
-    ? 'memories'
+    : location.pathname.startsWith('/knowledge-hub') || location.pathname.startsWith('/memories')
+    ? 'knowledge-hub'
     : 'capture';
 
   const selectedDocumentId =
@@ -149,8 +149,12 @@ function KnowledgeApp({ user, onSignedOut }: { user: User; onSignedOut: () => vo
   const selectedPublicDocumentId = new URLSearchParams(location.search).get('public_document');
 
   useEffect(() => {
+    if (location.pathname.startsWith('/memories')) {
+      navigate('/knowledge-hub', { replace: true });
+      return;
+    }
     if (view === 'admin' && user.role !== 'admin') navigate('/', { replace: true });
-  }, [view, user.role, navigate]);
+  }, [location.pathname, view, user.role, navigate]);
 
   useEffect(() => {
     if (!location.pathname.startsWith('/public-library')) return;
@@ -263,7 +267,12 @@ function KnowledgeApp({ user, onSignedOut }: { user: User; onSignedOut: () => vo
         />
       )}
 
-      {view === 'memories' && <MemoriesPage />}
+      {view === 'knowledge-hub' && <KnowledgeHubPage
+        documents={documents}
+        events={events}
+        onOpenLibrary={() => navigate('/library')}
+        onOpenMemorySource={(channel, sessionId) => navigate(`/${channel}/${encodeURIComponent(sessionId)}`)}
+      />}
     </AppShell>
   );
 }

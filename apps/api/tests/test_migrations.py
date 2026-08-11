@@ -8,6 +8,7 @@ from pathlib import Path
 from sqlalchemy import create_engine, inspect
 
 from app.store import metadata
+from app.main import EXPECTED_DATABASE_REVISION
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -38,7 +39,8 @@ class MigrationBootstrapTest(unittest.TestCase):
             database_url = f"sqlite+pysqlite:///{database_path.as_posix()}"
 
             self.run_alembic(database_url, "upgrade", "head")
-            self.assertIn("0013 (head)", self.run_alembic(database_url, "current"))
+            self.assertEqual(EXPECTED_DATABASE_REVISION, "0016")
+            self.assertIn(f"{EXPECTED_DATABASE_REVISION} (head)", self.run_alembic(database_url, "current"))
             self.assertIn(
                 "No new upgrade operations detected",
                 self.run_alembic(database_url, "check"),
@@ -63,6 +65,17 @@ class MigrationBootstrapTest(unittest.TestCase):
                 self.assertIn("audit_events", inspector.get_table_names())
                 self.assertIn("research_sessions", inspector.get_table_names())
                 self.assertIn("research_messages", inspector.get_table_names())
+                self.assertIn("knowledge_hub_settings", inspector.get_table_names())
+                self.assertIn("long_term_memories", inspector.get_table_names())
+                self.assertIn("long_term_memory_mutations", inspector.get_table_names())
+                self.assertIn("long_term_memory_events", inspector.get_table_names())
+                self.assertIn(
+                    "memory_refs", {column["name"] for column in inspector.get_columns("chat_messages")},
+                )
+                self.assertIn(
+                    "long_term_memory_enabled",
+                    {column["name"] for column in inspector.get_columns("knowledge_hub_settings")},
+                )
             finally:
                 engine.dispose()
 

@@ -8,6 +8,7 @@ import type {
   ResearchMode, ResearchSession, ResearchStreamHandlers, SourceProcessing,
 } from '../../lib/types';
 import { DraftPanel } from '../changes/DraftPanel';
+import { LongTermMemoryDisclosure } from '../knowledge-hub/LongTermMemoryDisclosure';
 import './research.css';
 
 type Props = {
@@ -41,6 +42,7 @@ function optimisticMessage(
     status: role === 'user' ? 'completed' : 'generating', content,
     requested_mode: mode, basis: null, model: null, citations: [], error_code: null,
     ingestion_source_id: null, created_at: now, completed_at: role === 'user' ? now : null,
+    memory_refs: [],
   };
 }
 
@@ -171,8 +173,24 @@ export function ResearchPage({ sessionId, onOpenSession, onRefresh }: Props) {
     onSources: (citations, basis) => setMessages((current) => current.map((message) =>
       message.id === assistantKey.current ? { ...message, citations, basis } : message
     )),
+    onLongTermMemoryContext: (memories) => setMessages((current) => current.map((message) =>
+      message.id === assistantKey.current ? { ...message, long_term_memory_context: memories } : message
+    )),
+    onLongTermMemoryCandidates: (memories) => setMessages((current) => current.map((message) =>
+      message.id === assistantKey.current ? { ...message, long_term_memory_candidates: memories } : message
+    )),
+    onLongTermMemoryMutation: (mutation) => setMessages((current) => current.map((message) =>
+      message.id === assistantKey.current ? {
+        ...message, long_term_memory_mutations: [...(message.long_term_memory_mutations || []), mutation],
+      } : message
+    )),
     onDone: (message) => {
-      setMessages((current) => current.map((item) => item.id === assistantKey.current ? message : item));
+      setMessages((current) => current.map((item) => item.id === assistantKey.current ? {
+        ...message,
+        long_term_memory_context: item.long_term_memory_context,
+        long_term_memory_candidates: item.long_term_memory_candidates,
+        long_term_memory_mutations: item.long_term_memory_mutations,
+      } : item));
       refreshSessions().catch(() => undefined);
     },
     onError: (streamError) => {
@@ -361,6 +379,12 @@ export function ResearchPage({ sessionId, onOpenSession, onRefresh }: Props) {
             {message.citations.length > 0 && <div className="research-sources"><b>参考来源</b>{message.citations.map((source) =>
               <button key={source.url} onClick={() => openSource(source.url)}><span>{source.ordinal}</span><div><strong>{source.title}</strong><small>{source.domain}</small></div></button>
             )}</div>}
+            {message.role === 'assistant' && <LongTermMemoryDisclosure
+              memoryRefs={message.memory_refs || []}
+              context={message.long_term_memory_context}
+              candidates={message.long_term_memory_candidates}
+              mutations={message.long_term_memory_mutations}
+            />}
             {message.role === 'assistant' && ['failed', 'cancelled'].includes(message.status) && <div className="research-actions">
               <button disabled={streaming} onClick={() => retry(message)}>重试</button>
               {['RESEARCH_WEB_SOURCE_REQUIRED', 'RESEARCH_WEB_UNAVAILABLE'].includes(message.error_code || '') && <button disabled={streaming} onClick={() => retry(message, 'ai')}>改用仅 AI 重试</button>}

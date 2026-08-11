@@ -92,6 +92,49 @@ class MemoryApiTest(unittest.TestCase):
         self.assertEqual(self.client.delete(f"/v1/memories/{memory['id']}").status_code, 204)
         self.assertEqual(self.client.get(f"/v1/memories/{memory['id']}").status_code, 404)
 
+    def test_knowledge_hub_settings_defaults_partial_updates_and_user_isolation(self):
+        self.assertEqual(self.client.get("/v1/knowledge-hub/settings").status_code, 401)
+        first = self.code_login("hub-first@example.com")
+        defaults = self.client.get("/v1/knowledge-hub/settings")
+        self.assertEqual(defaults.status_code, 200)
+        self.assertEqual(defaults.json(), {
+            "personalization_enabled": True,
+            "auto_learning_enabled": True,
+            "long_term_memory_enabled": True,
+        })
+        self.assertEqual(self.client.patch(
+            "/v1/knowledge-hub/settings", json={},
+        ).status_code, 422)
+        self.assertEqual(self.client.patch(
+            "/v1/knowledge-hub/settings", json={"unknown": False},
+        ).status_code, 422)
+
+        updated = self.client.patch("/v1/knowledge-hub/settings", json={
+            "personalization_enabled": False,
+        })
+        self.assertEqual(updated.status_code, 200)
+        self.assertEqual(updated.json(), {
+            "personalization_enabled": False,
+            "auto_learning_enabled": True,
+            "long_term_memory_enabled": True,
+        })
+
+        self.client.post("/v1/auth/logout")
+        self.code_login("hub-second@example.com")
+        self.assertEqual(self.client.get("/v1/knowledge-hub/settings").json(), {
+            "personalization_enabled": True,
+            "auto_learning_enabled": True,
+            "long_term_memory_enabled": True,
+        })
+        self.client.post("/v1/auth/logout")
+        restored = self.code_login("hub-first@example.com")
+        self.assertEqual(restored["id"], first["id"])
+        self.assertEqual(self.client.get("/v1/knowledge-hub/settings").json(), {
+            "personalization_enabled": False,
+            "auto_learning_enabled": True,
+            "long_term_memory_enabled": True,
+        })
+
     def test_duplicate_create_and_edit_are_rejected(self):
         self.code_login("memory-duplicate@example.com")
         first = self.client.post("/v1/memories", json={
@@ -204,6 +247,63 @@ class MemoryPipelineTest(unittest.TestCase):
         self.assertNotIn("标题用名词", main.ai.plan_blocks[0])
         self.assertEqual(main.store.get_memory(self.user["id"], style["id"])["use_count"], 1)
         self.assertEqual(main.store.get_memory(self.user["id"], candidate["id"])["use_count"], 0)
+
+    def test_personalization_setting_disables_pipeline_injection_and_usage(self):
+        class CapturingAI(LocalDemoAI):
+            def __init__(self):
+                self.extract_blocks = []
+                self.plan_blocks = []
+
+            def extract_inputs(self, inputs, source_label, **kwargs):
+                self.extract_blocks.append(kwargs.get("memory_block", ""))
+                return super().extract_inputs(inputs, source_label, **kwargs)
+
+            def plan_units(self, units, candidates, source_label, **kwargs):
+                self.plan_blocks.append(kwargs.get("memory_block", ""))
+                return super().plan_units(units, candidates, source_label, **kwargs)
+
+        style = self.create_memory("style", "使用简洁技术风格")
+        main.store.update_knowledge_hub_settings(
+            self.user["id"], personalization_enabled=False,
+        )
+        main.ai = CapturingAI()
+        source = main.store.create_source(self.user["id"], "text", "Nerva 保留来源证据", "Nerva")
+
+        draft = main.process_source(self.user["id"], source["id"])
+
+        self.assertEqual(draft["status"], "proposed")
+        self.assertEqual(main.ai.extract_blocks, [""])
+        self.assertEqual(main.ai.plan_blocks, [""])
+        self.assertEqual(main.store.get_memory(self.user["id"], style["id"])["use_count"], 0)
+
+    def test_auto_learning_setting_disables_reprocess_inference_independently(self):
+        class InferenceAI(LocalDemoAI):
+            def __init__(self):
+                self.inference_calls = 0
+
+            def infer_preferences(self, **kwargs):
+                self.inference_calls += 1
+                return MemoryInferenceResult(memories=[InferredMemory(
+                    kind="style", content="保留 API 英文", confidence=0.9, reason="explicit",
+                )])
+
+        main.ai = InferenceAI()
+        source = main.store.create_source(self.user["id"], "text", "可审计知识", "审计")
+        first = main.process_source(self.user["id"], source["id"])
+        self.assertEqual(main.ai.inference_calls, 0)
+        main.store.update_knowledge_hub_settings(
+            self.user["id"], personalization_enabled=True, auto_learning_enabled=False,
+        )
+        queued = main.store.queue_source_reprocess(
+            self.user["id"], source["id"], first["id"], "以后保留 API 英文",
+        )
+        self.assertIsNotNone(queued)
+
+        second = main.process_source(self.user["id"], source["id"])
+
+        self.assertEqual(second["status"], "proposed")
+        self.assertEqual(main.ai.inference_calls, 0)
+        self.assertEqual(main.store.list_memories(self.user["id"]), [])
 
     def test_usage_count_failure_is_non_fatal_after_draft_creation(self):
         self.create_memory("style", "使用短句")

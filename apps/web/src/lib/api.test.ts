@@ -104,15 +104,16 @@ describe('API error parsing', () => {
     await expect(api.me()).rejects.toMatchObject({ code: 'API_UNAVAILABLE', retryable: true, category: 'network' });
   });
 
-  it('maps a request timeout without exposing the browser exception', async () => {
+  it('times out even when the desktop transport ignores AbortSignal', async () => {
     vi.useFakeTimers();
-    vi.stubGlobal('fetch', vi.fn().mockImplementation((_url, init: RequestInit) => new Promise((_resolve, reject) => {
-      init.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
-    })));
+    const transport = vi.fn().mockImplementation(() => new Promise(() => undefined));
+    configureApiTransport(transport);
     const pending = api.me();
     const assertion = expect(pending).rejects.toMatchObject({ code: 'API_TIMEOUT', action: 'retry' });
     await vi.advanceTimersByTimeAsync(15_001);
     await assertion;
+    const [, init] = transport.mock.calls[0] as [string, RequestInit];
+    expect(init.signal?.aborted).toBe(true);
     vi.useRealTimers();
   });
 

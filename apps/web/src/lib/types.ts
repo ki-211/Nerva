@@ -110,6 +110,52 @@ export type MemoryUpdate = {
   status?: MemoryStatus;
 };
 
+export type KnowledgeHubSettings = {
+  personalization_enabled: boolean;
+  auto_learning_enabled: boolean;
+  long_term_memory_enabled: boolean;
+};
+
+export type KnowledgeHubSettingsUpdate = Partial<KnowledgeHubSettings>;
+
+export type LongTermMemoryKind = 'person' | 'project' | 'decision' | 'fact';
+export type LongTermMemoryStatus = 'active' | 'candidate' | 'suppressed';
+export type LongTermMemory = {
+  id: string;
+  kind: LongTermMemoryKind;
+  subject: string;
+  content: string;
+  status: LongTermMemoryStatus;
+  confidence: number;
+  origin: 'user_explicit' | 'ai_inferred' | 'manual';
+  reason: string | null;
+  source_channel: 'chat' | 'research' | 'manual' | 'history';
+  source_session_id: string | null;
+  source_message_id: string | null;
+  conflict_memory_id: string | null;
+  embedding_status: 'pending' | 'ready' | 'failed';
+  use_count: number;
+  last_used_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+export type LongTermMemoryCreate = Pick<LongTermMemory, 'kind' | 'subject' | 'content'>;
+export type LongTermMemoryUpdate = Partial<Pick<LongTermMemory, 'kind' | 'subject' | 'content' | 'status'>>;
+export type LongTermMemoryMutation = {
+  id: string;
+  action: 'create' | 'update' | 'delete';
+  memory_id: string;
+  memory: LongTermMemory | null;
+  expires_at: string;
+  undone_at: string | null;
+};
+export type LongTermMemoryEvent = {
+  id: string;
+  memory_id: string | null;
+  action: 'candidate_created' | 'remembered' | 'confirmed' | 'ignored' | 'corrected' | 'forgotten' | 'undo';
+  created_at: string;
+};
+
 export type SourceProcessing = {
   source_id: string;
   status: 'received' | 'processing' | 'proposed' | 'failed';
@@ -159,13 +205,20 @@ export type ChatMessage = {
   created_at: string;
   completed_at: string | null;
   include_public: boolean;
+  memory_refs: string[];
   memory_candidates?: Memory[];
+  long_term_memory_context?: LongTermMemory[];
+  long_term_memory_candidates?: LongTermMemory[];
+  long_term_memory_mutations?: LongTermMemoryMutation[];
 };
 
 export type ChatStreamHandlers = {
   onStart: (payload: { session_id: string; user_message_id: string; assistant_message_id: string }) => void;
   onDelta: (text: string) => void;
   onMemoryCandidates: (memories: Memory[]) => void;
+  onLongTermMemoryContext?: (memories: LongTermMemory[]) => void;
+  onLongTermMemoryCandidates?: (memories: LongTermMemory[]) => void;
+  onLongTermMemoryMutation?: (mutation: LongTermMemoryMutation) => void;
   onDone: (message: ChatMessage) => void;
   onError: (error: ApiStreamError) => void;
 };
@@ -209,6 +262,10 @@ export type ResearchMessage = {
   ingestion_source_id: string | null;
   created_at: string;
   completed_at: string | null;
+  memory_refs: string[];
+  long_term_memory_context?: LongTermMemory[];
+  long_term_memory_candidates?: LongTermMemory[];
+  long_term_memory_mutations?: LongTermMemoryMutation[];
 };
 
 export type ResearchStreamHandlers = {
@@ -220,6 +277,9 @@ export type ResearchStreamHandlers = {
   }) => void;
   onDelta: (text: string) => void;
   onSources: (citations: ResearchCitation[], basis: ResearchBasis) => void;
+  onLongTermMemoryContext?: (memories: LongTermMemory[]) => void;
+  onLongTermMemoryCandidates?: (memories: LongTermMemory[]) => void;
+  onLongTermMemoryMutation?: (mutation: LongTermMemoryMutation) => void;
   onDone: (message: ResearchMessage) => void;
   onError: (error: ApiStreamError) => void;
 };

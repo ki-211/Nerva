@@ -121,6 +121,42 @@ class ChatApiTest(unittest.TestCase):
         self.assertEqual(main.store.get_memory(user["id"], candidate["id"])["use_count"], 0)
         self.assertNotEqual(self.client.get("/v1/chat/sessions").json()[0]["title"], "新对话")
 
+    def test_knowledge_hub_settings_disable_chat_personalization_and_learning(self):
+        class MemoryAI(LocalDemoAI):
+            def __init__(self):
+                self.memory_blocks = []
+                self.inference_calls = 0
+
+            def stream_chat(self, history, sources, **kwargs):
+                self.memory_blocks.append(kwargs.get("memory_block", ""))
+                yield from super().stream_chat(history, sources, **kwargs)
+
+            def infer_preferences(self, **kwargs):
+                self.inference_calls += 1
+                return MemoryInferenceResult(memories=[InferredMemory(
+                    kind="style", content="保留 API 英文", confidence=0.9, reason="explicit",
+                )])
+
+        user = self.login("chat-hub-settings@example.com")
+        style = main.store.create_memory(
+            user["id"], kind="style", content="使用简洁回答", scope="global", scope_ref=None,
+            status="active", confidence=1.0, origin="user_explicit",
+        )
+        main.store.update_knowledge_hub_settings(
+            user["id"], personalization_enabled=False, auto_learning_enabled=False,
+        )
+        main.ai = MemoryAI()
+        session = self.client.post("/v1/chat/sessions", json={}).json()
+        response = self.client.post(f"/v1/chat/sessions/{session['id']}/messages", json={
+            "content": "请记住：以后回答都保留 API 英文。",
+        })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(main.ai.memory_blocks, [""])
+        self.assertEqual(main.ai.inference_calls, 0)
+        self.assertNotIn("memory_candidates", [name for name, _ in parse_sse(response.text)])
+        self.assertEqual(main.store.get_memory(user["id"], style["id"])["use_count"], 0)
+
     def test_explicit_preference_creates_candidate_but_project_fact_does_not(self):
         class MemoryAI(LocalDemoAI):
             def infer_preferences(self, **kwargs):

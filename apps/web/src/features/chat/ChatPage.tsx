@@ -3,6 +3,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { api } from '../../lib/api';
 import type { ChatMessage, ChatSession, ChatStreamHandlers, Memory } from '../../lib/types';
+import { LongTermMemoryDisclosure } from '../knowledge-hub/LongTermMemoryDisclosure';
 import './chat.css';
 
 type Props = {
@@ -25,7 +26,7 @@ function draftMessage(id: string, sessionId: string, role: 'user' | 'assistant',
     status: role === 'user' ? 'completed' : 'generating', content,
     model: null, grounding: null, citations: [], error_code: null,
     created_at: new Date().toISOString(), completed_at: role === 'user' ? new Date().toISOString() : null,
-    include_public: includePublic,
+    include_public: includePublic, memory_refs: [],
   };
 }
 
@@ -167,9 +168,25 @@ export function ChatPage({ sessionId, onOpenSession, onOpenDocument, onOpenCaptu
     onMemoryCandidates: (memories) => setMessages((current) => current.map((message) =>
       message.id === assistantKey.current ? { ...message, memory_candidates: memories } : message
     )),
+    onLongTermMemoryContext: (memories) => setMessages((current) => current.map((message) =>
+      message.id === assistantKey.current ? { ...message, long_term_memory_context: memories } : message
+    )),
+    onLongTermMemoryCandidates: (memories) => setMessages((current) => current.map((message) =>
+      message.id === assistantKey.current ? { ...message, long_term_memory_candidates: memories } : message
+    )),
+    onLongTermMemoryMutation: (mutation) => setMessages((current) => current.map((message) =>
+      message.id === assistantKey.current ? {
+        ...message, long_term_memory_mutations: [...(message.long_term_memory_mutations || []), mutation],
+      } : message
+    )),
     onDone: (message) => {
       setMessages((current) => current.map((item) =>
-        item.id === assistantKey.current ? { ...message, memory_candidates: item.memory_candidates } : item
+        item.id === assistantKey.current ? {
+          ...message, memory_candidates: item.memory_candidates,
+          long_term_memory_context: item.long_term_memory_context,
+          long_term_memory_candidates: item.long_term_memory_candidates,
+          long_term_memory_mutations: item.long_term_memory_mutations,
+        } : item
       ));
       refreshSessions().catch(() => undefined);
     },
@@ -340,6 +357,12 @@ export function ChatPage({ sessionId, onOpenSession, onOpenDocument, onOpenCaptu
                     ))}
                   </div>
                 )}
+                {message.role === 'assistant' && <LongTermMemoryDisclosure
+                  memoryRefs={message.memory_refs || []}
+                  context={message.long_term_memory_context}
+                  candidates={message.long_term_memory_candidates}
+                  mutations={message.long_term_memory_mutations}
+                />}
                 {message.role === 'assistant' && ['failed', 'cancelled'].includes(message.status) && (
                   <button className="retry-message" onClick={() => retry(message)}>重新生成</button>
                 )}

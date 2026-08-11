@@ -229,6 +229,135 @@ class MemoryInferenceResult(BaseModel):
     memories: list[InferredMemory] = Field(default_factory=list, max_length=10)
 
 
+class KnowledgeHubSettings(BaseModel):
+    personalization_enabled: bool = True
+    auto_learning_enabled: bool = True
+    long_term_memory_enabled: bool = True
+
+
+class KnowledgeHubSettingsUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    personalization_enabled: bool | None = None
+    auto_learning_enabled: bool | None = None
+    long_term_memory_enabled: bool | None = None
+
+    @model_validator(mode="after")
+    def require_change(self):
+        if (
+            self.personalization_enabled is None
+            and self.auto_learning_enabled is None
+            and self.long_term_memory_enabled is None
+        ):
+            raise ValueError("At least one knowledge hub setting must be provided")
+        return self
+
+
+LongTermMemoryKind = Literal["person", "project", "decision", "fact"]
+LongTermMemoryStatus = Literal["active", "candidate", "suppressed"]
+LongTermMemoryOrigin = Literal["user_explicit", "ai_inferred", "manual"]
+LongTermMemorySource = Literal["chat", "research", "manual", "history"]
+
+
+class LongTermMemory(BaseModel):
+    id: str
+    kind: LongTermMemoryKind
+    subject: str
+    content: str
+    status: LongTermMemoryStatus
+    confidence: float = Field(ge=0, le=1)
+    origin: LongTermMemoryOrigin
+    reason: str | None
+    source_channel: LongTermMemorySource
+    source_session_id: str | None
+    source_message_id: str | None
+    conflict_memory_id: str | None
+    embedding_status: Literal["pending", "ready", "failed"]
+    use_count: int = Field(ge=0)
+    last_used_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class LongTermMemoryCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    kind: LongTermMemoryKind
+    subject: str = Field(min_length=1, max_length=160)
+    content: str = Field(min_length=1, max_length=2000)
+
+    @field_validator("subject", "content")
+    @classmethod
+    def normalize_long_term_text(cls, value: str) -> str:
+        value = " ".join(value.split())
+        if not value:
+            raise ValueError("Long-term memory text cannot be blank")
+        return value
+
+
+class LongTermMemoryUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    kind: LongTermMemoryKind | None = None
+    subject: str | None = Field(default=None, min_length=1, max_length=160)
+    content: str | None = Field(default=None, min_length=1, max_length=2000)
+    status: LongTermMemoryStatus | None = None
+
+    @field_validator("subject", "content")
+    @classmethod
+    def normalize_optional_long_term_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = " ".join(value.split())
+        if not value:
+            raise ValueError("Long-term memory text cannot be blank")
+        return value
+
+    @model_validator(mode="after")
+    def require_long_term_change(self):
+        if all(getattr(self, field) is None for field in ("kind", "subject", "content", "status")):
+            raise ValueError("At least one long-term memory field must be provided")
+        return self
+
+
+class InferredLongTermMemory(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    action: Literal["remember", "update", "forget"] = "remember"
+    kind: LongTermMemoryKind
+    subject: str = Field(min_length=1, max_length=160)
+    content: str = Field(min_length=1, max_length=2000)
+    confidence: float = Field(ge=0.6, le=1)
+    reason: str = Field(min_length=1, max_length=1000)
+    target_memory_id: str | None = None
+    explicit: bool = False
+
+
+class LongTermMemoryInferenceResult(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    memories: list[InferredLongTermMemory] = Field(default_factory=list, max_length=10)
+
+
+class LongTermMemoryMutation(BaseModel):
+    id: str
+    action: Literal["create", "update", "delete"]
+    memory_id: str
+    memory: LongTermMemory | None = None
+    expires_at: datetime
+    undone_at: datetime | None = None
+
+
+class LongTermMemoryEvent(BaseModel):
+    id: str
+    memory_id: str | None
+    action: Literal[
+        "candidate_created", "remembered", "confirmed", "ignored", "corrected", "forgotten", "undo",
+    ]
+    created_at: datetime
+
+
+class LongTermMemoryHistoryRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    channel: Literal["all", "chat", "research"] = "all"
+
+
 ChatGrounding = Literal["knowledge", "knowledge_plus_general", "general", "insufficient"]
 ChatMessageStatus = Literal["generating", "completed", "failed", "cancelled"]
 ResearchMode = Literal["smart", "web", "ai"]
@@ -302,6 +431,7 @@ class ChatMessage(BaseModel):
     model: str | None
     grounding: ChatGrounding | None
     citations: list[ChatCitation]
+    memory_refs: list[str] = Field(default_factory=list)
     error_code: str | None
     created_at: datetime
     completed_at: datetime | None
@@ -369,6 +499,7 @@ class ResearchMessage(BaseModel):
     basis: ResearchBasis | None
     model: str | None
     citations: list[ResearchCitation]
+    memory_refs: list[str] = Field(default_factory=list)
     error_code: str | None
     ingestion_source_id: str | None
     created_at: datetime

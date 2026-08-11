@@ -8,7 +8,7 @@ import { UserAuthPage } from '../features/auth/UserAuthPage';
 import { UserAppShell } from './UserAppShell';
 import { CaptureView } from '../features/capture/CaptureView';
 import { LibraryView, GrowthView } from '../features/documents/knowledgeViews';
-import { MemoriesPage } from '../features/memories/MemoriesPage';
+import { KnowledgeHubPage } from '../features/knowledge-hub/KnowledgeHubPage';
 import { ChatPage } from '../features/chat/ChatPage';
 import { SearchPage } from '../features/search/SearchPage';
 import { ResearchPage } from '../features/research/ResearchPage';
@@ -62,12 +62,17 @@ function UserKnowledgeApp({ user, onSignedOut }: { user: User; onSignedOut: () =
     : location.pathname.startsWith('/library') ? 'library'
     : location.pathname.startsWith('/chat') ? 'chat'
     : location.pathname.startsWith('/growth') ? 'growth'
-    : location.pathname.startsWith('/memories') ? 'memories' : 'capture';
+    : location.pathname.startsWith('/knowledge-hub') || location.pathname.startsWith('/memories') ? 'knowledge-hub' : 'capture';
   const selectedDocumentId = view === 'library' ? decodeURIComponent(location.pathname.split('/')[2] || '') || null : null;
   const selectedEventId = view === 'growth' ? decodeURIComponent(location.pathname.split('/')[2] || '') || null : null;
   const selectedChatSessionId = view === 'chat' ? decodeURIComponent(location.pathname.split('/')[2] || '') || null : null;
   const selectedResearchSessionId = view === 'research' ? decodeURIComponent(location.pathname.split('/')[2] || '') || null : null;
   const selectedPublicDocumentId = new URLSearchParams(location.search).get('public_document');
+
+  useEffect(() => {
+    if (!location.pathname.startsWith('/memories')) return;
+    navigate('/knowledge-hub', { replace: true });
+  }, [location.pathname, navigate]);
 
   useEffect(() => {
     if (!location.pathname.startsWith('/public-library')) return;
@@ -96,6 +101,6 @@ function UserKnowledgeApp({ user, onSignedOut }: { user: User; onSignedOut: () =
     {view === 'search' && <SearchPage onOpenDocument={openDocument} />}
     {view === 'library' && <LibraryView documents={documents} selectedDocumentId={selectedDocumentId} onSelect={(id) => navigate(`/library/${encodeURIComponent(id)}`)} onDirtyChange={setLibraryDirty} onSaved={async (updated) => { setDocuments((current) => current.map((item) => item.id === updated.id ? updated : item)); setEvents(await api.events()); }} />}
     {view === 'growth' && <GrowthView events={events} selectedEventId={selectedEventId} onOpen={(id) => navigate(`/growth/${encodeURIComponent(id)}`)} onClose={() => navigate('/growth')} onOpenDocument={(id) => navigate(`/library/${encodeURIComponent(id)}`)} />}
-    {view === 'memories' && <MemoriesPage />}
+    {view === 'knowledge-hub' && <KnowledgeHubPage documents={documents} events={events} onOpenLibrary={() => navigate('/library')} onOpenMemorySource={(channel, sessionId) => navigate(`/${channel}/${encodeURIComponent(sessionId)}`)} />}
   </UserAppShell>;
 }
